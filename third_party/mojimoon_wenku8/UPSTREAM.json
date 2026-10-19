@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/mojimoon/wenku8",
+  "commit": "d120c014464b36d7f8eddb6dbf56a542594cff27",
+  "license": "MIT",
+  "files": [
+    {
+      "path": "gen_epub.py",
+      "git_blob": "9584be234dfc944b5cb51fe4402103e27fae1088"
+    },
+    {
+      "path": "epub_maker.py",
+      "git_blob": "d7d16bab5b415d2cc6a57a77256833cac867431f"
+    },
+    {
+      "path": "utils/__init__.py",
+      "git_blob": "84ff83836899fe6950ab12881754280b8c59b027"
+    },
+    {
+      "path": "utils/fetcher.py",
+      "git_blob": "5cca42cb100db37447f908845fd589fb0fc43cc3"
+    },
+    {
+      "path": "LICENSE",
+      "git_blob": "44675c46f76bce35a6b12cbcc4f74537eefab33a"
+    }
+  ],
+  "modifications": "上游文件未改动。generate.py 运行时关闭 fetch_image，确保不下载封面。"
+}
