@@ -587,7 +587,7 @@ async function generateFromWenku(format = 'epub') {
   if (busy || generating) return;
   const aid = $('wenkuAid').value.trim(), volume = $('wenkuVolume').value, vid = $('wenkuVid').value.trim();
   if (!aid || !/^\d+$/.test(volume) || Number(volume) < 1 || Number(volume) > 2000 || (vid && !/^\d+$/.test(vid))) {
-    $('generateStatus').textContent = '请填写小说 ID／链接和有效的卷序号；分卷 ID 可以留空。'; return;
+    $('generateStatus').textContent = '请填写小说 ID／链接和有效的目录序号；分卷 ID 可以留空。'; return;
   }
   generating = true; setBusy(false);
   $('generateLog').hidden = false; $('generateLog').textContent = '';
@@ -612,6 +612,7 @@ async function generateFromWenku(format = 'epub') {
       $('txtTitle').value = status.result.title;
       $('txtAuthor').value = status.result.author || '';
       $('txtSeries').value = status.result.series || '';
+      $('txtSeriesIndex').value = status.result.series_index || '';
       $('txtTags').value = (status.result.subjects || []).join(' ');
       $('txtDescription').value = status.result.description || '';
       $('txtEncoding').value = status.result.encoding === 'utf-16' ? 'utf-16' : 'utf-8';
@@ -633,7 +634,7 @@ $('localTxtFile').addEventListener('change', () => {
   const file = $('localTxtFile').files[0];
   $('localTxtName').textContent = file?.name || '尚未选择文件';
   $('txtTitle').value = file?.name.replace(/\.txt$/i,'') || '';
-  for (const id of ['txtAuthor','txtSeries','txtTags','txtDescription','txtVolumeTitle']) $(id).value = '';
+  for (const id of ['txtAuthor','txtSeries','txtSeriesIndex','txtTags','txtDescription','txtVolumeTitle']) $(id).value = '';
   $('txtEncoding').value = 'auto'; $('txtConvertStatus').textContent = '';
 });
 $('convertTxt').addEventListener('click', async () => {
@@ -644,7 +645,7 @@ $('convertTxt').addEventListener('click', async () => {
   }
   const settings = {title:$('txtTitle').value.trim(),author:$('txtAuthor').value.trim(),
     encoding:$('txtEncoding').value,volume_title:$('txtVolumeTitle').value.trim(),
-    description:$('txtDescription').value.trim()};
+    description:$('txtDescription').value.trim(),series_index:$('txtSeriesIndex').value.trim()};
   if ($('txtSeries').value.trim()) settings.series = $('txtSeries').value.trim();
   if ($('txtTags').value.trim()) settings.subjects = [...new Set($('txtTags').value.split(/[\s,，、;；]+/).filter(Boolean))];
   const body = new FormData();body.append('text',file);body.append('settings',JSON.stringify(settings));

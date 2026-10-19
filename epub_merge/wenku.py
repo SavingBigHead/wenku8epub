@@ -17,7 +17,7 @@ import time
 
 from .books import BookError, Epub
 from .presentation import prepare_epub, serialize_xml
-from .metadata import volume_title, read_metadata, OPF
+from .metadata import volume_title, read_metadata, write_metadata, OPF
 from .wenku_txt import download_parameters, volume_id, parse_catalog, fetch_packed
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,7 +48,7 @@ def book_id(value):
 def volume_number(value):
     text = str(value)
     if not text.isdigit() or not 1 <= int(text) <= 2000:
-        raise BookError('卷序号必须是 1～2000 的整数，对应文库目录中的顺序。')
+        raise BookError('目录序号必须是 1～2000 的整数，对应文库目录中的第几本。')
     return int(text)
 
 
@@ -128,14 +128,11 @@ def generate_no_images(aid, volume=1, scraper='requests', *, vid=None, fetcher=N
         print('    从分卷 TXT 获取正文：aid=%s，vid=%s' % (aid,selected['download_vid']),flush=True)
         chapters,txt_url,encoding,cached,raw_txt = fetch_packed(fetcher,aid,selected,cache_root,detail.get('update',''),include_raw=True,parse_chapters=output_format != 'txt')
         print('    %s，实际编码 %s%s' % ('复用 TXT 缓存' if cached else '已下载 TXT',encoding,('，%s 章' % len(chapters)) if output_format=='epub' else '，保留原始 TXT'),flush=True)
-        vol_title = volume_title(selected['title'],volume)
+        vol_title = volume_title(selected['title'])
         title = (detail.get('title') or str(aid))+' '+vol_title
-        description = detail.get('description','')
-        synopsis = next(('\n'.join(c['paragraphs']) for c in chapters if re.fullmatch(r'(?:第.*卷\s*)?(?:内容简介|本卷简介|分卷简介|故事简介|简介)',c['title'].strip())), '')
-        if synopsis: description = synopsis
-        origin = '本卷简介' if synopsis else ('全书简介' if description else '源站未提供简介')
-        numbered = re.search(r'第(\d+)(\.\d+)?卷',vol_title)
-        series_index = str(int(numbered[1]))+(numbered[2] or '') if numbered else str(volume)
+        description = detail.get('description','') if volume == 1 else ''
+        origin = '全书简介' if description else ''
+        series_index = str(volume)
         if output_format == 'txt':
             path = output/str(aid)/('v%02d.txt' % volume)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +140,7 @@ def generate_no_images(aid, volume=1, scraper='requests', *, vid=None, fetcher=N
             return {'aid':aid,'volume':volume,'vid':selected['download_vid'],'title':title,'file':str(path.resolve()),
                     'filename':re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',title)[:120]+'.txt',
                     'size':len(raw_txt),'encoding':encoding,'format':'txt','author':detail.get('author',''),
-                    'description':description,'series':detail.get('title',''),'series_index':series_index,'subjects':detail.get('tags','').split()}
+                    'description':description,'description_source':origin,'series':detail.get('title',''),'series_index':series_index,'subjects':detail.get('tags','').split()}
         meta = upstream.NovelMeta(title=title,author=detail.get('author',''),source_url=upstream.book_url(aid),
             description=description,publisher=detail.get('publisher',''),subjects=detail.get('tags','').split(),
             status=detail.get('status',''),modified=detail.get('update',''),identifier='urn:wenku8:%s:v%s:packtxt' % (aid,volume),
@@ -153,8 +150,8 @@ def generate_no_images(aid, volume=1, scraper='requests', *, vid=None, fetcher=N
         path.parent.mkdir(parents=True,exist_ok=True)
         upstream.create_epub(meta,[vol],{},None,str(path),prefix='v%02d_' % volume)
         epub=Epub(path.read_bytes())
+        write_metadata(epub.opf,title,meta.author,{**read_metadata(epub.opf),'description_source':origin})
         md=epub.opf.find('{%s}metadata' % OPF)
-        ET.SubElement(md,'{%s}meta' % OPF,{'name':'wenku8:description-source','content':origin})
         ET.SubElement(md,'{http://purl.org/dc/elements/1.1/}source').text=txt_url
         buf=io.BytesIO()
         with zipfile.ZipFile(buf,'w') as archive:
@@ -179,7 +176,7 @@ def generate_no_images(aid, volume=1, scraper='requests', *, vid=None, fetcher=N
 def main():
     parser = argparse.ArgumentParser(description='使用 mojimoon/wenku8 生成真正无图的分卷 EPUB。')
     parser.add_argument('--aid', required=True, help='小说 ID 或文库书籍链接')
-    parser.add_argument('--volume', default='1', help='文库目录中的卷序号，默认 1')
+    parser.add_argument('--volume', default='1', help='文库目录中第几本（包含短篇集和外传），默认 1')
     parser.add_argument('--vid', help='可选的分卷 ID，留空时按卷序号自动取得')
     parser.add_argument('--scraper', choices=['requests', 'curl_cffi'], default='requests')
     parser.add_argument('--format', dest='output_format', choices=['epub','txt'], default='epub', help='保存原始 TXT 或生成无图 EPUB')

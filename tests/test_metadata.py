@@ -26,8 +26,8 @@ class MetadataTests(unittest.TestCase):
     def test_volume_numbers_preserve_actual_decimal_volume(self):
         for title, expected in [('第一卷','第01卷'),('第十一卷','第11卷'),('第两百零一卷','第201卷'),('第6.5卷','第06.5卷'),('第六点五卷','第06.5卷'),('第０２卷 副标题','第02卷 副标题'),('故事 第01卷','故事 第01卷')]:
             self.assertEqual(normalize_volumes(title), expected)
-        self.assertEqual(volume_title('番外篇', 8), '第08卷 番外篇')
-        self.assertEqual(volume_title('第6.5卷', 8), '第06.5卷')
+        self.assertEqual(volume_title('番外篇'), '番外篇')
+        self.assertEqual(volume_title('第6.5卷'), '第06.5卷')
 
     def test_metadata_imported_and_exported_with_original_style(self):
         self.assertEqual(self.settings['series'], '雨夜来信')
@@ -109,7 +109,7 @@ class SourceEncodingTests(unittest.TestCase):
                 fetcher.get('https://www.wenku8.net/book/1213.htm')
         fetcher.close()
 
-    def test_explicit_volume_synopsis_has_priority_and_number_survives(self):
+    def test_first_catalog_entry_uses_book_description_and_preserves_synopsis_chapter(self):
         class Fixture:
             def get(self,url,validate=None,encoding='gb18030'):
                 if '/book/' in url:
@@ -126,9 +126,10 @@ class SourceEncodingTests(unittest.TestCase):
             output=Epub(Path(result['file']).read_bytes())
             self.assertEqual(output.title,'测试小说 第06.5卷 番外')
             self.assertIn('第06.5卷',result['filename'])
-            self.assertEqual(output.metadata['description'],'这是该卷单独的简介。')
-            self.assertEqual(output.metadata['description_source'],'本卷简介')
-            self.assertEqual(output.metadata['series_index'],'6.5')
+            self.assertEqual(output.metadata['description'],'全书简介')
+            self.assertEqual(output.metadata['description_source'],'全书简介')
+            self.assertEqual(output.metadata['series_index'],'1')
             self.assertEqual(output.metadata['subjects'],['校园','青春'])
+            self.assertIn('这是该卷单独的简介。', [p.text for p in parse_text(Path(result['file']).read_bytes(),'base.epub').paragraphs])
             self.assertNotIn(b'<h1',output.read('OEBPS/Text/v01_v1.xhtml'))
             self.assertIn('第06.5卷'.encode(),output.read('OEBPS/Text/v01_Intro.xhtml'))

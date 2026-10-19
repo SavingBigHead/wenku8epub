@@ -33,9 +33,8 @@ def normalize_volumes(value):
     return VOLUME.sub(lambda m: '第' + number(m[1]) + '卷', str(value))
 
 
-def volume_title(value, ordinal):
-    title = normalize_volumes(value.strip())
-    return title if VOLUME.search(title) else '第%02d卷 %s' % (ordinal, title)
+def volume_title(value):
+    return normalize_volumes(value.strip())
 
 
 def read_metadata(opf):

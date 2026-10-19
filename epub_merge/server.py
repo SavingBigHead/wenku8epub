@@ -102,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
                 name, media = static[path]
                 self.send(200, (WEB / name).read_bytes(), media)
             elif path == '/api/health':
-                self.json(200, {'ok': True, 'version': '0.10.0'})
+                self.json(200, {'ok': True, 'version': '0.10.2'})
             elif path.startswith('/api/wenku/jobs/'):
                 parts = path.split('/')
                 if len(parts) == 6 and parts[5] in {'epub','txt'}:
