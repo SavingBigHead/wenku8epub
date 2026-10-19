@@ -6,23 +6,20 @@
 
 ## 启动
 
-当前电脑已准备好独立环境。双击 start.cmd，或在 Arch WSL 项目目录运行：
+项目使用 uv 管理环境，Python 固定为 3.14.8（.python-version），所有依赖的具体版本及校验值固定在 uv.lock。当前 Arch WSL 已安装 uv。
+
+双击 start.cmd，或在 Arch WSL 项目目录运行：
 
 ~~~bash
-.venv/bin/python run.py
+uv sync --locked
+uv run --locked run.py
 ~~~
 
-打开 <http://127.0.0.1:8765>。换端口可以加 --port 8766。
+打开 <http://127.0.0.1:8765>。换端口可以加 --port 8766。uv run 会自动检查并同步项目的 .venv，不需要手动激活环境。
 
-换一台电脑时，需要 Python 3.10+：
+换一台电脑时，先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再在项目目录执行上面的命令。uv 会在需要时下载固定版本的 Python 并安装锁定的依赖。Windows 原生环境也可执行相同的 uv 命令；start.cmd 是当前 Arch WSL 的快捷入口。
 
-~~~bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-wenku.txt
-.venv/bin/python run.py
-~~~
-
-Windows 原生环境使用 .venv\Scripts\python.exe。仅合并本地文件时，可直接使用系统 Python 启动，不需要抓取依赖。
+日常启动使用 --locked：如果依赖声明与锁文件不一致，会提示错误，不会自动更改锁定版本。主动升级依赖时运行 uv lock --upgrade，再运行 uv sync --locked 并验证。pyproject.toml、uv.lock 和 .python-version 应一同纳入版本管理；.venv 不提交。
 
 ## 生成无图底稿
 
@@ -45,10 +42,10 @@ Windows 原生环境使用 .venv\Scripts\python.exe。仅合并本地文件时�
 完成后底稿自动填入中文正文，也可单独下载。命令行示例：
 
 ~~~bash
-.venv/bin/python generate.py --aid 1163 --volume 1
-.venv/bin/python generate.py --aid 1163 --vid 35538
-.venv/bin/python generate.py --aid 1163 --vid 35538 --format txt
-.venv/bin/python generate.py --aid "https://dl.wenku8.com/packtxt.php?aid=1163&vid=35538&charset=utf-8"
+uv run --locked generate.py --aid 1163 --volume 1
+uv run --locked generate.py --aid 1163 --vid 35538
+uv run --locked generate.py --aid 1163 --vid 35538 --format txt
+uv run --locked generate.py --aid "https://dl.wenku8.com/packtxt.php?aid=1163&vid=35538&charset=utf-8"
 ~~~
 
 输出为 out/text/小说ID/vNN.epub，旁边有卷索引 index.json。下载文件名使用实际书名和「第01卷」格式。TXT 缓存独立保存在 out/cache/小说ID/packtxt/；目录与更新时间一致时复用，最长一天。旧逐章 HTML 缓存不再使用。
@@ -120,7 +117,7 @@ TXT 和其他普通 EPUB 使用统一段落重排，其字体、加粗、超链�
 每次处理一卷，每份输入最多 80 MB，最多 16000 段／400 张图片，EPUB 解压最多 350 MB。不支持 DRM、扫描版和固定版式。支持 JPEG／PNG／GIF／WebP 和简单自包含 SVG，阅读器兼容性可能不同。
 
 ~~~bash
-.venv/bin/python -m unittest discover -s tests -v
+uv run --locked python -m unittest discover -s tests -v
 ~~~
 
 测试涵盖 TXT 编码、目录切章、有效正文与错误页、缓存、下架公告与下载源的独立处理、原排版及元数据保留、章首与章尾的章节文件归属、段落增删改／空章节／新增段落放图、项目恢复、候选区分及原图字节。已实际验证 1163《古典部》第一卷（手动首章 ID 与自动目录卷 ID）及 1213 第一卷可从新来源生成。未对全部书籍或所有阅读器作兼容性认证。

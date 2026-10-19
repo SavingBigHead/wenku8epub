@@ -60,7 +60,7 @@ def load_upstream():
         importlib.import_module('utils.fetcher').COOKIE_FILE = str(ROOT / 'COOKIE')
         return module
     except ImportError as exc:
-        raise BookError('缺少正文生成依赖，请先运行：python -m pip install -r requirements-wenku.txt') from exc
+        raise BookError('缺少正文生成依赖，请先运行：uv sync --locked') from exc
 
 
 def source_fetcher(upstream, scraper):
@@ -222,8 +222,7 @@ class GeneratorJobs:
         return token
 
     def _run(self, token, aid, volume, scraper, vid=None, output_format='epub'):
-        python = ROOT / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-        command = [str(python) if python.is_file() else sys.executable, '-u', str(ROOT / 'generate.py'),
+        command = [sys.executable, '-u', str(ROOT / 'generate.py'),
                    '--aid', str(aid), '--volume', str(volume), '--scraper', scraper]
         if output_format != 'epub': command.extend(['--format',output_format])
         if vid is not None: command.extend(['--vid',str(vid)])
