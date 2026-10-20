@@ -102,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
                 name, media = static[path]
                 self.send(200, (WEB / name).read_bytes(), media)
             elif path == '/api/health':
-                self.json(200, {'ok': True, 'version': '0.10.2'})
+                self.json(200, {'ok': True, 'version': '0.11.0'})
             elif path.startswith('/api/wenku/jobs/'):
                 parts = path.split('/')
                 if len(parts) == 6 and parts[5] in {'epub','txt'}:
@@ -214,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/text/edit':
                 payload = json.loads(self.body(limit=8 * 1024 * 1024))
                 if not isinstance(payload, dict):
-                    raise BookError('段落修改请求无效。')
+                    raise BookError('正文修改请求无效。')
                 book, _ = self.server.state.get(payload.get('session'))
                 edited = apply_edits(book, {'text_edits': payload.get('text_edits', [])}, preserve_source=False)
                 self.json(200, edited.public())

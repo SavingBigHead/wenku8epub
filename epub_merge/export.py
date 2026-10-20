@@ -243,7 +243,8 @@ def build_report(book, donor, settings):
             'small{word-break:break-all}code{overflow-wrap:anywhere}</style><h1>%s · 合并记录</h1>'
             '<p>作者：%s<br/>正文：%s<br/>插图：%s</p><p>正文 SHA-256：<code>%s</code><br/>插图源 SHA-256：<code>%s</code></p>'
             '<p>正文 %d 段；图片保持源文件字节。匹配分数是文本相似度，不是准确率。正文插图均由用户确认。同一位置的图片按本记录出现顺序插入。</p>'
-            '<p>段落修改记录：%d 条（已应用于导出的正文）。</p>'
+            '<p>段落修改记录：%d 条（已应用于导出的正文）。<br/>章节标题修改记录：%d 条（已同步正文与目录）。</p>'
             '<table><tr><th>图片</th><th>用途</th><th>插入位置</th><th>原始建议分数</th></tr>%s</table></html>') % (
                 escape(title), escape(title), escape(author), escape(book.filename), escape(donor.filename),
-                book.fingerprint, donor.fingerprint, len(book.paragraphs), len(settings.get('text_edits', [])), ''.join(rows))
+                book.fingerprint, donor.fingerprint, len(book.paragraphs), sum(e['op'] != 'rename_chapter' for e in settings.get('text_edits', [])),
+                sum(e['op'] == 'rename_chapter' for e in settings.get('text_edits', [])), ''.join(rows))

@@ -150,6 +150,7 @@ function renderRail() {
 function updateSummary() {
   if (!state) return;
   $('undoTextEdit').disabled = busy || !editHistory.length;
+  $('renameChapter').disabled = busy || !!viewPage;
   const images = state.settings.images;
   const bodies = images.filter(x => x.role === 'body');
   const pending = bodies.filter(x => !x.confirmed || !x.after_id).length;
@@ -217,6 +218,7 @@ function renderActive(jump = false) {
 function renderReader() {
   const paragraphs = state.text.paragraphs, decision = decisionAt();
   const page = (state.text.pages || []).find(p => p.id === viewPage);
+  $('renameChapter').disabled = busy || !!page;
   $('placeChapterStart').textContent = page ? '插入扉页开头' : '插入本章开头';
   $('placeChapterEnd').textContent = page ? '插入扉页末尾' : '插入本章结尾';
   if (page) {
@@ -344,7 +346,7 @@ $('saveProject').addEventListener('click', () => {
   if (!state) return;
   download(new Blob([JSON.stringify(state.settings, null, 2)], { type: 'application/json' }), safeName(state.settings.title) + '·校对项目.json');
   savedSnapshot = JSON.stringify(state.settings);
-  toast('已保存段落修改、插图位置和书籍信息；恢复时需导入同一组原始文件。');
+  toast('已保存章节标题、段落修改、插图位置和书籍信息；恢复时需导入同一组原始文件。');
 });
 $('loadProject').addEventListener('change', async event => {
   const file = event.target.files[0]; if (!file || !state || busy) return;
@@ -370,7 +372,7 @@ $('loadProject').addEventListener('change', async event => {
     clearLocalImageURLs();
     state.text = editedText; state.donor = nextDonor; active = Math.min(active, nextDonor.illustrations.length - 1); editHistory = [];
     state.settings = {...state.settings, ...project, text_edits: project.text_edits || [], added_images: project.added_images || [], image_order: imageOrder}; savedSnapshot = JSON.stringify(state.settings); renderMetadata();
-    renderSections(); renderAll(true); toast('已恢复段落修改、插图位置和新增图片及顺序。');
+    renderSections(); renderAll(true); toast('已恢复章节标题、段落修改、插图位置和新增图片及顺序。');
   } catch (error) { toast('无法载入：' + error.message); }
   finally { event.target.value = ''; setBusy(false); }
 });
@@ -389,7 +391,7 @@ async function exportFile(report = false) {
 $('export').addEventListener('click', () => exportFile(false));
 $('report').addEventListener('click', () => exportFile(true));
 window.addEventListener('beforeunload', event => {
-  if (state && (JSON.stringify(state.settings) !== savedSnapshot || ($('paragraphDialog').open && $('paragraphText').value !== (paragraphEditor?.op === 'edit' ? state.text.paragraphs.find(p => p.id === paragraphEditor.id)?.text : '')))) { event.preventDefault(); event.returnValue = ''; }
+  if (state && (JSON.stringify(state.settings) !== savedSnapshot || ($('paragraphDialog').open && $('paragraphText').value !== editorOriginalText()))) { event.preventDefault(); event.returnValue = ''; }
 });
 
 
@@ -399,25 +401,36 @@ function currentLocations(text = state.text) {
 }
 async function previewEdits(edits) {
   const body = JSON.stringify({session:state.session, text_edits:edits});
-  if (new Blob([body]).size > 8*1024*1024) throw new Error('段落修改记录过大，请减少修改后再保存。');
+  if (new Blob([body]).size > 8*1024*1024) throw new Error('文字修改记录过大，请减少修改后再保存。');
   return (await request('/api/text/edit', {method:'POST', headers:{'Content-Type':'application/json'}, body})).json();
 }
+function editorOriginalText() {
+  if (paragraphEditor?.op === 'rename_chapter') return state.text.chapters.find(c => c.id === paragraphEditor.id)?.title || '';
+  return paragraphEditor?.op === 'edit' ? state.text.paragraphs.find(p => p.id === paragraphEditor.id)?.text || '' : '';
+}
+$('renameChapter').addEventListener('click', () => {
+  if (!busy && state && !viewPage) openParagraphEditor('rename_chapter', $('chapterSelect').value);
+});
 function openParagraphEditor(op, id) {
   const p = state.text.paragraphs.find(p => p.id === id);
   const chapter = state.text.chapters.find(c => c.id === (p?.chapter_id || id));
-  if (!chapter || (op !== 'empty' && !p)) return;
+  if (!chapter || (!['empty','rename_chapter'].includes(op) && !p)) return;
   const index = p ? state.text.paragraphs.indexOf(p) : -1;
   const previous = state.text.paragraphs[index-1];
   const after = op === 'after' ? p.id : previous?.chapter_id === chapter.id ? previous.id : null;
   paragraphEditor = {op, id, chapter_id:chapter.id, after_id:after};
-  $('paragraphDialogTitle').textContent = ({edit:'修改段落',before:'在前面添加段落',after:'在后面添加段落',delete:'删除段落',empty:'添加段落'})[op];
+  $('paragraphDialogTitle').textContent = ({edit:'修改段落',before:'在前面添加段落',after:'在后面添加段落',delete:'删除段落',empty:'添加段落',rename_chapter:'修改章节标题'})[op];
   const attached = state.settings.images.filter(i => i.role === 'body' && i.after_id === id).length;
-  $('paragraphDialogContext').textContent = chapter.title + (op === 'delete' ? '\n'+(p.text.trim() ? p.text : '（空段落）')+'\n删除后可撤销。'+(attached ? attached+' 张插图将清除位置，需要重新选择。' : '') : '\n修改后，本章插图需要重新确认。');
+  $('paragraphDialogContext').textContent = op === 'rename_chapter' ? '同步更新正文标题、目录和插图位置说明。' : chapter.title + (op === 'delete' ? '\n'+(p.text.trim() ? p.text : '（空段落）')+'\n删除后可撤销。'+(attached ? attached+' 张插图将清除位置，需要重新选择。' : '') : '\n修改后，本章插图需要重新确认。');
   $('paragraphText').hidden = $('paragraphTextLabel').hidden = op === 'delete';
-  $('paragraphText').required = false;
-  $('paragraphText').value = op === 'edit' ? p.text : '';
+  $('paragraphTextLabel').textContent = op === 'rename_chapter' ? '章节标题（不能为空，最多 300 字）' : '正文（可留空）';
+  $('paragraphText').required = op === 'rename_chapter';
+  $('paragraphText').maxLength = op === 'rename_chapter' ? 300 : 20000;
+  $('paragraphText').rows = op === 'rename_chapter' ? 3 : 9;
+  $('paragraphText').placeholder = op === 'rename_chapter' ? '输入新的章节标题' : '留空保存为空段落；删除整段请使用删除按钮。';
+  $('paragraphText').value = op === 'rename_chapter' ? chapter.title : op === 'edit' ? p.text : '';
   $('paragraphEditStatus').textContent = '';
-  $('saveParagraphEdit').textContent = op === 'delete' ? '删除段落' : '保存段落';
+  $('saveParagraphEdit').textContent = op === 'rename_chapter' ? '保存标题' : op === 'delete' ? '删除段落' : '保存段落';
   $('paragraphDialog').showModal();
   (op === 'delete' ? $('cancelParagraphEdit') : $('paragraphText')).focus();
 }
@@ -426,18 +439,20 @@ $('paragraphDialog').addEventListener('cancel', e => { if (busy) e.preventDefaul
 $('paragraphForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (busy || !paragraphEditor) return;
-  const context = paragraphEditor, text = $('paragraphText').value;
-  if (context.op === 'edit' && text === state.text.paragraphs.find(p => p.id === context.id)?.text) { $('paragraphDialog').close(); return; }
-  const added = !['edit','delete'].includes(context.op);
-  const edit = added ? {op:'add',id:'u_'+crypto.randomUUID(),chapter_id:context.chapter_id,after_id:context.after_id,text} : {op:context.op,id:context.id,...(context.op === 'edit' ? {text} : {})};
+  const context = paragraphEditor, renaming = context.op === 'rename_chapter';
+  const text = renaming ? $('paragraphText').value.trim() : $('paragraphText').value;
+  if (renaming && !text) { $('paragraphEditStatus').textContent = '章节标题不能为空。'; return; }
+  if (['edit','rename_chapter'].includes(context.op) && text === editorOriginalText()) { $('paragraphDialog').close(); return; }
+  const added = !['edit','delete','rename_chapter'].includes(context.op);
+  const edit = added ? {op:'add',id:'u_'+crypto.randomUUID(),chapter_id:context.chapter_id,after_id:context.after_id,text} : {op:context.op,id:context.id,...(context.op !== 'delete' ? {text} : {})};
   const edits = [...(state.settings.text_edits || []), edit];
   setBusy(true); $('saveParagraphEdit').disabled = $('cancelParagraphEdit').disabled = true;
-  $('paragraphEditStatus').textContent = '正在保存段落…';
+  $('paragraphEditStatus').textContent = renaming ? '正在保存章节标题…' : '正在保存段落…';
   try {
     const next = await previewEdits(edits);
-    editHistory.push({edits:structuredClone(state.settings.text_edits || []), images:structuredClone(state.settings.images), focus:context.id, chapter:context.chapter_id});
+    editHistory.push({edits:structuredClone(state.settings.text_edits || []), images:structuredClone(state.settings.images), kind:context.op, focus:renaming ? state.text.paragraphs.find(p => p.chapter_id === context.chapter_id)?.id : context.id, chapter:context.chapter_id});
     if (editHistory.length > 30) editHistory.shift();
-    for (const image of state.settings.images) {
+    for (const image of renaming ? [] : state.settings.images) {
       if (context.op === 'delete' && image.after_id === context.id) { image.after_id = null; if (image.role === 'body') image.confirmed = false; }
       else if (image.role === 'body' && (state.text.paragraphs.find(p => p.id === image.after_id)?.chapter_id === context.chapter_id || [chapterStart(context.chapter_id),chapterEnd(context.chapter_id)].includes(image.after_id) || (image.after_id === START && context.chapter_id === state.text.chapters[0].id))) image.confirmed = false;
     }
@@ -448,7 +463,7 @@ $('paragraphForm').addEventListener('submit', async event => {
     else viewStart = Math.max(0,Math.min(viewStart,next.paragraphs.length-1));
     $('searchResults').hidden = true;
     $('paragraphDialog').close(); renderAll(false);
-    toast(context.op === 'delete' ? '段落已删除；本章插图请重新确认，原本跟随此段的插图需重新定位。' : '段落已保存；本章插图请重新确认。保存校对项目可保留修改。');
+    toast(renaming ? '章节标题已保存，并同步目录；保存校对项目可保留修改。' : context.op === 'delete' ? '段落已删除；本章插图请重新确认，原本跟随此段的插图需重新定位。' : '段落已保存；本章插图请重新确认。保存校对项目可保留修改。');
   } catch(error) { $('paragraphEditStatus').textContent = error.message; }
   finally { setBusy(false); $('saveParagraphEdit').disabled = $('cancelParagraphEdit').disabled = false; }
 });
@@ -461,13 +476,13 @@ $('undoTextEdit').addEventListener('click', async () => {
     editHistory.pop(); state.text = next;
     const currentCover = state.settings.images.find(x => x.role === 'cover')?.id;
     state.settings.text_edits = previous.edits;
-    state.settings.images = state.donor.illustrations.map(image => previous.images.find(x => x.id === image.id) || state.settings.images.find(x => x.id === image.id));
+    if (previous.kind !== 'rename_chapter') state.settings.images = state.donor.illustrations.map(image => previous.images.find(x => x.id === image.id) || state.settings.images.find(x => x.id === image.id));
     const covers = state.settings.images.filter(x => x.role === 'cover');
     if (covers.length > 1) for (const image of covers) if (image.id !== currentCover) {image.role = 'front'; image.confirmed = true;}
     viewPage = null; renderSections(); $('chapterSelect').value = previous.chapter;
     viewStart = Math.max(0,next.paragraphs.findIndex(p => p.id === previous.focus));
     $('searchResults').hidden = true; renderAll(false);
-    toast('已撤销最近一次段落修改，并恢复当时的插图位置。');
+    toast(previous.kind === 'rename_chapter' ? '已撤销最近一次章节标题修改。' : '已撤销最近一次段落修改，并恢复当时的插图位置。');
   } catch(error) { toast(error.message); }
   finally { setBusy(false); }
 });
