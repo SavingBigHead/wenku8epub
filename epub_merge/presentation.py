@@ -105,7 +105,15 @@ def prepare_epub(data):
     for item in source.manifest.values():
         path = item['path']
         if not path: continue
-        if 'nav' in item.get('properties', '').split():
+        if re.search(r'/Text/(?:v\d+_)?Intro\.xhtml$', path, re.I):
+            raw = source.read(path)
+            description = re.search(br'<div class="intro">.*?</div>', raw, re.S)
+            if description:
+                credit = re.search(br'\s*<p class="meta"[^>]*>' + '来源：'.encode('utf-8') + br'.*?</p>', raw[:description.start()], re.S)
+                if credit:
+                    # Move the original source block, without rewriting its text or style.
+                    replacements[path] = raw[:credit.start()] + raw[credit.end():description.end()] + credit[0] + raw[description.end():]
+        elif 'nav' in item.get('properties', '').split():
             nav = xml(source.read(path))
             toc = next((n for n in nav.iter() if local_name(n.tag) == 'nav' and (n.get('{http://www.idpf.org/2007/ops}type') == 'toc' or n.get('id') == 'toc')), None)
             ol = next((n for n in toc if local_name(n.tag) == 'ol'), None) if toc is not None else None
