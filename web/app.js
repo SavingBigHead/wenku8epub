@@ -57,6 +57,93 @@ function imageURL(id) {
   return localImageURLs.get(id);
 }
 
+function normalizeImageRotations(images) {
+  if (!Array.isArray(images)) throw new Error('校对项目缺少图片设置。');
+  return images.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('项目中存在无效的图片设置。');
+    const rotation = Object.hasOwn(item, 'rotation') ? item.rotation : 0;
+    if (!Number.isInteger(rotation) || ![0, 90, 180, 270].includes(rotation)) throw new Error('图片旋转角度无效，只能是整数 0、90、180 或 270。');
+    return {...item, rotation};
+  });
+}
+
+// All previews fit the rotated bounding box, without changing or re-encoding the source.
+function imagePreviewHTML(image, decision, alt, lazy = false) {
+  return '<span class="image-preview" data-preview-id="' + escapeHTML(image.id) + '" data-rotation="' + decision.rotation + '"><img' + (lazy ? ' loading="lazy"' : '') + ' src="' + escapeHTML(imageURL(image.id)) + '" alt="' + escapeHTML(alt) + '"></span>';
+}
+function fitImagePreview(preview) {
+  const img = preview.querySelector('img');
+  if (!img) return;
+  const width = preview.clientWidth, height = preview.clientHeight;
+  if (!img.complete || !img.naturalWidth || !img.naturalHeight || !width || !height) {
+    img.style.visibility = 'hidden';
+    img.style.removeProperty('transform');
+    img.style.removeProperty('width');
+    img.style.removeProperty('height');
+    return;
+  }
+  const rotation = Number(preview.dataset.rotation), sideways = rotation === 90 || rotation === 270;
+  const boxWidth = sideways ? img.naturalHeight : img.naturalWidth;
+  const boxHeight = sideways ? img.naturalWidth : img.naturalHeight;
+  const scale = Math.min(width / boxWidth, height / boxHeight);
+  img.style.width = img.naturalWidth * scale + 'px';
+  img.style.height = img.naturalHeight * scale + 'px';
+  img.style.transform = 'translate(-50%, -50%) rotate(' + rotation + 'deg)';
+  img.style.visibility = 'visible';
+}
+function refreshImagePreviews(root) {
+  const previews = root.matches('.image-preview') ? [root] : root.querySelectorAll('.image-preview');
+  for (const preview of previews) {
+    const img = preview.querySelector('img');
+    img.onload = img.onerror = () => fitImagePreview(preview);
+    fitImagePreview(preview);
+  }
+}
+function renderCurrentImage(image, decision) {
+  const img = $('currentImage'), preview = img.parentElement, url = imageURL(image.id);
+  preview.dataset.previewId = image.id;
+  preview.dataset.rotation = decision.rotation;
+  if (img.getAttribute('src') !== url) {
+    // Never show the previous image's transform while the next source is loading.
+    img.style.visibility = 'hidden';
+    img.style.removeProperty('transform');
+    img.style.removeProperty('width');
+    img.style.removeProperty('height');
+    img.src = url;
+  }
+  img.alt = roleNames[decision.role] + '，第 ' + (active + 1) + ' 张';
+  refreshImagePreviews(preview);
+  updateRotationControls();
+}
+function updateRotationControls() {
+  const disabled = busy || !state || !state.donor.illustrations.length;
+  $('rotateLeft').disabled = $('rotateRight').disabled = disabled;
+  $('imageRotation').textContent = '角度 ' + (state?.donor.illustrations.length ? decisionAt().rotation : 0) + '°';
+}
+function rotateActiveImage(delta) {
+  if (busy || !state || !state.donor.illustrations.length) return;
+  const decision = decisionAt();
+  decision.rotation = (decision.rotation + delta + 360) % 360;
+  // Update only pictures: keep placement, confirmation, order and reader scroll intact.
+  for (const preview of document.querySelectorAll('.image-preview')) {
+    if (preview.dataset.previewId !== decision.id) continue;
+    preview.dataset.rotation = decision.rotation;
+    fitImagePreview(preview);
+  }
+  updateRotationControls();
+}
+$('rotateLeft').addEventListener('click', () => rotateActiveImage(-90));
+$('rotateRight').addEventListener('click', () => rotateActiveImage(90));
+const imagePreviewRoots = [$('imageRail'), $('currentImage').parentElement, $('imageOrderList')];
+if (typeof ResizeObserver !== 'undefined') {
+  const previewObserver = new ResizeObserver(entries => {
+    for (const entry of entries) refreshImagePreviews(entry.target);
+  });
+  for (const root of imagePreviewRoots) previewObserver.observe(root);
+} else {
+  window.addEventListener('resize', () => imagePreviewRoots.forEach(refreshImagePreviews));
+}
+
 function toast(message) {
   $('toast').textContent = message;
   $('toast').hidden = false;
@@ -71,6 +158,7 @@ function setBusy(value) {
   for (const id of ['generateText','saveRawTxt','convertTxt']) $(id).disabled = value || generating;
   $('analyze').disabled = value || generating;
   $('demo').disabled = value || generating;
+  updateRotationControls();
   if (!value && state) updateSummary();
 }
 
@@ -114,9 +202,10 @@ async function analyze(demo = false) {
   try {
     const response = await request(demo ? '/api/demo' : '/api/analyze', { method: 'POST', body });
     const next = await response.json();
+    next.settings.images = normalizeImageRotations(next.settings.images);
+    next.settings.image_order = validateImageOrder(next.donor, next.settings.image_order);
     clearLocalImageURLs();
     state = next; editHistory = []; paragraphEditor = null; active = 0; viewStart = 0; viewPage = null; savedSnapshot = JSON.stringify(state.settings);
-    state.settings.image_order = validateImageOrder(state.donor, state.settings.image_order);
     renderMetadata();
     $('intro').hidden = true; $('importPanel').hidden = true; $('workspace').hidden = false;
     $('importStatus').textContent = '';
@@ -143,8 +232,9 @@ function renderRail() {
   $('imageRail').innerHTML = state.donor.illustrations.map((image, index) => {
     const decision = state.settings.images.find(x => x.id === image.id);
     const pending = decision.role === 'body' && (!decision.confirmed || !decision.after_id);
-    return '<button class="thumb ' + (index === active ? 'active' : '') + '" data-image="' + index + '" aria-label="第 ' + (index + 1) + ' 张，' + roleNames[decision.role] + (pending ? '，待确认' : '') + '" aria-pressed="' + (index === active) + '"><img loading="lazy" src="' + imageURL(image.id) + '" alt="插图缩略图"><span class="thumb-label">' + (index + 1) + ' · ' + roleNames[decision.role] + '<i class="dot ' + (pending ? 'pending' : 'done') + '"></i></span></button>';
+    return '<button class="thumb ' + (index === active ? 'active' : '') + '" data-image="' + index + '" aria-label="第 ' + (index + 1) + ' 张，' + roleNames[decision.role] + (pending ? '，待确认' : '') + '" aria-pressed="' + (index === active) + '">' + imagePreviewHTML(image, decision, '插图缩略图', true) + '<span class="thumb-label">' + (index + 1) + ' · ' + roleNames[decision.role] + '<i class="dot ' + (pending ? 'pending' : 'done') + '"></i></span></button>';
   }).join('');
+  refreshImagePreviews($('imageRail'));
 }
 
 function updateSummary() {
@@ -171,8 +261,7 @@ function renderAll(jump = false) {
 function renderActive(jump = false) {
   const image = imageAt(), decision = decisionAt();
   $('imageNumber').textContent = String(active + 1).padStart(2, '0') + ' / ' + String(state.donor.illustrations.length).padStart(2, '0');
-  $('currentImage').src = imageURL(image.id);
-  $('currentImage').alt = roleNames[decision.role] + '，第 ' + (active + 1) + ' 张';
+  renderCurrentImage(image, decision);
   $('viewImage').href = imageURL(image.id);
   $('imageInfo').textContent = (image.width ? image.width + ' × ' + image.height + ' · ' : '') + (image.size / 1024).toFixed(0) + ' KB · 原图';
   $('imageRole').value = decision.role;
@@ -346,7 +435,7 @@ $('saveProject').addEventListener('click', () => {
   if (!state) return;
   download(new Blob([JSON.stringify(state.settings, null, 2)], { type: 'application/json' }), safeName(state.settings.title) + '·校对项目.json');
   savedSnapshot = JSON.stringify(state.settings);
-  toast('已保存章节标题、段落修改、插图位置和书籍信息；恢复时需导入同一组原始文件。');
+  toast('已保存章节标题、段落修改、插图位置与角度和书籍信息；恢复时需导入同一组原始文件。');
 });
 $('loadProject').addEventListener('change', async event => {
   const file = event.target.files[0]; if (!file || !state || busy) return;
@@ -356,23 +445,24 @@ $('loadProject').addEventListener('change', async event => {
     const project = JSON.parse(await file.text());
     if (project.version !== 1 || project.text_fingerprint !== state.text.fingerprint || project.donor_fingerprint !== state.donor.fingerprint) throw new Error('项目与当前文件不一致，请先导入保存项目时的同一组文件。');
     if ((project.layout || 'rebuild') !== state.text.layout) throw new Error('项目使用了旧的正文重排方式，请在保留 mojimoon 底稿的模式下重新确认图片位置。');
+    const normalizedImages = normalizeImageRotations(project.images);
     const editedText = await previewEdits(project.text_edits || []);
     const nextDonor = await previewImages(project.added_images || []);
     const imageOrder = validateImageOrder(nextDonor, project.image_order);
     sortImageList(nextDonor, imageOrder);
     const ids = new Set(nextDonor.illustrations.map(x => x.id)), pids = currentLocations(editedText), seen = new Set();
-    if (!Array.isArray(project.images) || project.images.length !== ids.size || typeof project.title !== 'string' || typeof project.author !== 'string') throw new Error('校对项目格式不完整。');
-    for (const item of project.images) {
+    if (normalizedImages.length !== ids.size || typeof project.title !== 'string' || typeof project.author !== 'string') throw new Error('校对项目格式不完整。');
+    for (const item of normalizedImages) {
       if (!item || !ids.has(item.id) || seen.has(item.id) || !Object.hasOwn(roleNames, item.role) || typeof item.confirmed !== 'boolean' || (item.after_id != null && !pids.has(item.after_id))) throw new Error('项目中存在无效的图片或段落位置。');
       seen.add(item.id);
     }
-    if (project.images.filter(x => x.role === 'cover').length > 1) throw new Error('项目中存在多张封面。');
+    if (normalizedImages.filter(x => x.role === 'cover').length > 1) throw new Error('项目中存在多张封面。');
     for (const key of ['description','series','series_index','description_source']) if (key in project && typeof project[key] !== 'string') throw new Error('书籍元数据格式无效。');
     if ('subjects' in project && (!Array.isArray(project.subjects) || project.subjects.some(x => typeof x !== 'string'))) throw new Error('标签格式无效。');
     clearLocalImageURLs();
     state.text = editedText; state.donor = nextDonor; active = Math.min(active, nextDonor.illustrations.length - 1); editHistory = [];
-    state.settings = {...state.settings, ...project, text_edits: project.text_edits || [], added_images: project.added_images || [], image_order: imageOrder}; savedSnapshot = JSON.stringify(state.settings); renderMetadata();
-    renderSections(); renderAll(true); toast('已恢复章节标题、段落修改、插图位置和新增图片及顺序。');
+    state.settings = {...state.settings, ...project, images: normalizedImages, text_edits: project.text_edits || [], added_images: project.added_images || [], image_order: imageOrder}; savedSnapshot = JSON.stringify(state.settings); renderMetadata();
+    renderSections(); renderAll(true); toast('已恢复章节标题、段落修改、插图位置与角度，以及新增图片和顺序。');
   } catch (error) { toast('无法载入：' + error.message); }
   finally { event.target.value = ''; setBusy(false); }
 });
@@ -476,7 +566,15 @@ $('undoTextEdit').addEventListener('click', async () => {
     editHistory.pop(); state.text = next;
     const currentCover = state.settings.images.find(x => x.role === 'cover')?.id;
     state.settings.text_edits = previous.edits;
-    if (previous.kind !== 'rename_chapter') state.settings.images = state.donor.illustrations.map(image => previous.images.find(x => x.id === image.id) || state.settings.images.find(x => x.id === image.id));
+    if (previous.kind !== 'rename_chapter') {
+      const currentImages = new Map(state.settings.images.map(image => [image.id, image]));
+      state.settings.images = state.donor.illustrations.map(image => {
+        const current = currentImages.get(image.id);
+        const restored = previous.images.find(x => x.id === image.id) || current;
+        // Rotation is an image edit, not part of the text edit being undone.
+        return {...restored, rotation: current.rotation};
+      });
+    }
     const covers = state.settings.images.filter(x => x.role === 'cover');
     if (covers.length > 1) for (const image of covers) if (image.id !== currentCover) {image.role = 'front'; image.confirmed = true;}
     viewPage = null; renderSections(); $('chapterSelect').value = previous.chapter;
@@ -523,7 +621,7 @@ $('localImages').addEventListener('change', async event => {
     const all = [...existing, ...added];
     const nextDonor = await previewImages(all);
     const anchor = decisionAt().role === 'body' && currentLocations().has(decisionAt().after_id) ? decisionAt().after_id : null;
-    const nextSettings = {...state.settings, added_images:all, image_order:[...state.settings.image_order, ...added.map(x=>x.id)], images:[...state.settings.images, ...added.map(x=>({id:x.id,role:'body',after_id:anchor,confirmed:false}))]};
+    const nextSettings = {...state.settings, added_images:all, image_order:[...state.settings.image_order, ...added.map(x=>x.id)], images:[...state.settings.images, ...added.map(x=>({id:x.id,role:'body',after_id:anchor,confirmed:false,rotation:0}))]};
     if (new Blob([JSON.stringify(nextSettings, null, 2)]).size > MAX_PROJECT) throw new Error('项目超过 64 MB，请减少新增图片。');
     sortImageList(nextDonor, nextSettings.image_order);
     const firstNew = nextDonor.illustrations.findIndex(x=>x.id===added[0].id);
@@ -571,8 +669,9 @@ function renderImageOrder() {
   $('imageOrderHint').textContent = images.length > 1 ? '从上到下依次插入。上移、下移可交叉排列原插图与新增图片。' : '这里目前只有一张图片；将其他图片放在同一位置后即可排序。';
   $('imageOrderList').innerHTML = images.map((image,i)=>{
     const name = image.local ? state.settings.added_images.find(x=>x.id===image.id)?.filename : image.source_path.split('/').at(-1);
-    return '<li class="'+(image.id===imageAt().id?'current':'')+'"><button class="order-preview" data-order-select="'+image.id+'" aria-label="查看第 '+(i+1)+' 张：'+escapeHTML(name)+'"><img src="'+imageURL(image.id)+'" alt=""><span><b>'+(i+1)+'</b> '+escapeHTML(name)+'</span></button><div class="order-actions"><button class="quiet" data-order-move="'+image.id+'" data-direction="-1" '+(i===0?'disabled':'')+' aria-label="上移第 '+(i+1)+' 张">↑ 上移</button><button class="quiet" data-order-move="'+image.id+'" data-direction="1" '+(i===images.length-1?'disabled':'')+' aria-label="下移第 '+(i+1)+' 张">↓ 下移</button></div></li>';
+    return '<li class="'+(image.id===imageAt().id?'current':'')+'"><button class="order-preview" data-order-select="'+image.id+'" aria-label="查看第 '+(i+1)+' 张：'+escapeHTML(name)+'">'+imagePreviewHTML(image, state.settings.images.find(x=>x.id===image.id), '')+'<span><b>'+(i+1)+'</b> '+escapeHTML(name)+'</span></button><div class="order-actions"><button class="quiet" data-order-move="'+image.id+'" data-direction="-1" '+(i===0?'disabled':'')+' aria-label="上移第 '+(i+1)+' 张">↑ 上移</button><button class="quiet" data-order-move="'+image.id+'" data-direction="1" '+(i===images.length-1?'disabled':'')+' aria-label="下移第 '+(i+1)+' 张">↓ 下移</button></div></li>';
   }).join('');
+  refreshImagePreviews($('imageOrderList'));
 }
 $('imageOrderList').addEventListener('click', event=>{
   if (busy) return;

@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import math
 import posixpath
 import re
 import struct
@@ -369,32 +370,174 @@ def parse_text(data, filename, encoding=None):
     return TextBook(title, author, chapters, paragraphs, filename, hashlib.sha256(data).hexdigest(), warnings, metadata=book.metadata if filename.lower().endswith('.epub') else {})
 
 
+# Bound wrapper geometry without decoding pixels (including WebP's 24-bit canvas).
+_IMAGE_DIMENSION_LIMIT = 1 << 24
+_SVG_NUMBER = r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?'
+
+
+def _image_dimensions(width, height):
+    if all(math.isfinite(n) and 1e-6 <= n <= _IMAGE_DIMENSION_LIMIT for n in (width, height)):
+        return width, height
+    return 0, 0
+
+
+def _jpeg_exif_orientation(data):
+    """Read only the inline SHORT Orientation in TIFF IFD0; never follow tags."""
+    if len(data) < 8 or data[:2] not in {b'II', b'MM'}:
+        return 0
+    order = 'little' if data[:2] == b'II' else 'big'
+
+    def integer(start, size):
+        return int.from_bytes(data[start:start + size], order)
+
+    if integer(2, 2) != 42:
+        return 0
+    offset = integer(4, 4)
+    if offset < 8 or offset + 2 > len(data):
+        return 0
+    count = integer(offset, 2)
+    # Include the trailing next-IFD pointer, but do not follow it (thumbnails).
+    if offset + 2 + count * 12 + 4 > len(data):
+        return 0
+    orientation = None
+    for start in range(offset + 2, offset + 2 + count * 12, 12):
+        if integer(start, 2) == 0x0112:
+            value = integer(start + 8, 2)
+            if orientation is not None or integer(start + 2, 2) != 3 or integer(start + 4, 4) != 1 or not 1 <= value <= 8:
+                return 0
+            orientation = value
+    return orientation if orientation is not None else 1
+
+
+def _jpeg_dimensions(data):
+    i, dimensions, orientation = 2, (0, 0), None
+    while i < len(data):
+        if data[i] != 255:
+            return 0, 0
+        while i < len(data) and data[i] == 255:
+            i += 1
+        if i >= len(data):
+            return 0, 0
+        marker = data[i]
+        i += 1
+        if marker in {0xD9, 0xDA}:  # Never interpret entropy-coded scan bytes as metadata.
+            break
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            continue
+        if marker in {0, 0xD8} or i + 2 > len(data):
+            return 0, 0
+        length = int.from_bytes(data[i:i + 2], 'big')
+        if length < 2 or i + length > len(data):
+            return 0, 0
+        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+            if length < 8:
+                return 0, 0
+            height, width = struct.unpack('>HH', data[i + 3:i + 7])
+            size = _image_dimensions(width, height)
+            if dimensions != (0, 0) and dimensions != size:
+                return 0, 0
+            dimensions = size
+        elif marker == 0xE1 and data[i + 2:i + 8] == b'Exif\0\0':
+            value = _jpeg_exif_orientation(data[i + 8:i + length])
+            orientation = value if orientation is None else (orientation if orientation == value else 0)
+        i += length
+    if orientation == 0:
+        return 0, 0
+    # Browsers already apply EXIF: report its display size, not another transform.
+    return dimensions[::-1] if orientation in {5, 6, 7, 8} else dimensions
+
+
+def _webp_dimensions(data):
+    end = 8 + int.from_bytes(data[4:8], 'little')
+    if end < 12 or end > len(data) or end % 2:
+        return 0, 0
+    i = 12
+    while i + 8 <= end:
+        kind = data[i:i + 4]
+        size = int.from_bytes(data[i + 4:i + 8], 'little')
+        start = i + 8
+        if start + size + (size & 1) > end:
+            return 0, 0
+        if kind == b'VP8X':
+            if i != 12 or size != 10 or data[start] & 0xC1 or data[start + 1:start + 4] != b'\0\0\0':
+                return 0, 0
+            # This is the full canvas, including for ANIM/ANMF animations.
+            width = 1 + int.from_bytes(data[start + 4:start + 7], 'little')
+            height = 1 + int.from_bytes(data[start + 7:start + 10], 'little')
+            if width * height > 0xFFFFFFFF:  # The container also limits canvas area.
+                return 0, 0
+            return _image_dimensions(width, height)
+        if kind == b'VP8 ':
+            if size < 10 or data[start] & 1 or data[start + 3:start + 6] != b'\x9d\x01\x2a':
+                return 0, 0
+            return _image_dimensions(int.from_bytes(data[start + 6:start + 8], 'little') & 0x3FFF,
+                                     int.from_bytes(data[start + 8:start + 10], 'little') & 0x3FFF)
+        if kind == b'VP8L':
+            if size < 5 or data[start] != 0x2F:
+                return 0, 0
+            bits = int.from_bytes(data[start + 1:start + 5], 'little')
+            if bits >> 29:  # Only version zero is defined.
+                return 0, 0
+            return _image_dimensions(1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF))
+        i = start + size + (size & 1)
+    return 0, 0
+
+
+def _svg_dimensions(root):
+    # Inline CSS can override presentation attributes; do not guess its cascade.
+    if root.get('style', '').strip():
+        return 0, 0
+    units = {'': 1, 'px': 1, 'in': 96, 'cm': 96 / 2.54, 'mm': 96 / 25.4,
+             'q': 96 / 101.6, 'pt': 96 / 72, 'pc': 16}
+
+    def length(value):
+        if value is None:
+            return None
+        if len(value) > 80:
+            return 0
+        value = value.strip(' \t\r\n')
+        if value == 'auto':
+            return None
+        match = re.fullmatch(rf'({_SVG_NUMBER})([a-zA-Z%]*)', value)
+        if not match:
+            return 0
+        number, unit = float(match[1]), match[2].lower()
+        if not math.isfinite(number) or not 1e-6 <= number <= _IMAGE_DIMENSION_LIMIT:
+            return 0
+        if unit == '%':  # Relative lengths have no intrinsic pixel dimension.
+            return None
+        return number * units[unit] if unit in units else 0
+
+    width, height = length(root.get('width')), length(root.get('height'))
+    if width == 0 or height == 0:
+        return 0, 0
+    if width is not None and height is not None:
+        return _image_dimensions(width, height)
+    viewbox = root.get('viewBox', '')
+    if len(viewbox) > 300:
+        return 0, 0
+    viewbox = viewbox.strip(' \t\r\n')
+    if not re.fullmatch(rf'{_SVG_NUMBER}(?:(?:[ \t\r\n]*,[ \t\r\n]*|[ \t\r\n]+){_SVG_NUMBER}){{3}}', viewbox):
+        return 0, 0
+    x, y, vw, vh = map(float, re.split(r'[ \t\r\n,]+', viewbox))
+    if not all(math.isfinite(n) and abs(n) <= _IMAGE_DIMENSION_LIMIT for n in (x, y, vw, vh)) or _image_dimensions(vw, vh) == (0, 0):
+        return 0, 0
+    if width is not None:
+        return _image_dimensions(width, width * vh / vw)
+    if height is not None:
+        return _image_dimensions(height * vw / vh, height)
+    return vw, vh
+
+
 def image_info(data, declared=''):
     if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) >= 24:
-        return 'image/png', 'png', *struct.unpack('>II', data[16:24])
+        return 'image/png', 'png', *_image_dimensions(*struct.unpack('>II', data[16:24]))
     if data[:3] == b'GIF' and len(data) >= 10:
-        return 'image/gif', 'gif', *struct.unpack('<HH', data[6:10])
+        return 'image/gif', 'gif', *_image_dimensions(*struct.unpack('<HH', data[6:10]))
     if data[:2] == b'\xff\xd8':
-        i = 2
-        width = height = 0
-        while i + 4 <= len(data):
-            if data[i] != 255:
-                i += 1
-                continue
-            marker = data[i + 1]
-            if marker in {0xD8, 0xD9, 0x01} or 0xD0 <= marker <= 0xD7:
-                i += 2
-                continue
-            length = int.from_bytes(data[i + 2:i + 4], 'big')
-            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF} and i + 9 <= len(data):
-                height, width = struct.unpack('>HH', data[i + 5:i + 9])
-                break
-            if length < 2:
-                break
-            i += length + 2
-        return 'image/jpeg', 'jpg', width, height
+        return 'image/jpeg', 'jpg', *_jpeg_dimensions(data)
     if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-        return 'image/webp', 'webp', 0, 0
+        return 'image/webp', 'webp', *_webp_dimensions(data)
     if b'<svg' in data[:1000]:
         root = xml(data)
         if local_name(root.tag) != 'svg':
@@ -406,7 +549,7 @@ def image_info(data, declared=''):
             for key, value in element.attrib.items():
                 if local_name(key).startswith('on') or local_name(key) in {'href', 'src'} or 'url(' in value.lower():
                     raise BookError('SVG 包含外部引用或活动内容。')
-        return 'image/svg+xml', 'svg', 0, 0
+        return 'image/svg+xml', 'svg', *_svg_dimensions(root)
     raise BookError('不支持或无法识别的图片格式。')
 
 

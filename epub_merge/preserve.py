@@ -13,6 +13,7 @@ from xml.etree import ElementTree as ET
 from .locations import START, resolve_location, page_location, empty_chapter
 from .books import BookError, Epub, local_name, xml
 from .metadata import metadata_values, write_metadata
+from .image_rotation import svg_image
 
 OPF = 'http://www.idpf.org/2007/opf'
 DC = 'http://purl.org/dc/elements/1.1/'
@@ -66,6 +67,7 @@ def build_preserved(book, donor, settings, validated):
         item(prefix + image.id, path, image.media_type, 'cover-image' if image is cover else '')
 
     patches = defaultdict(list)
+    svg_paths = set()
     # Combine coincident offsets in donor order before patching source bytes.
     for image in donor.illustrations:
         decision = decisions[image.id]
@@ -83,8 +85,13 @@ def build_preserved(book, donor, settings, validated):
             reference = book.anchors[paragraph.id]
             path = reference['path']
             offset = reference['start'] if side == 'before' else reference['end']
-        markup = '\n<div class="illust" id="%s"><img src="%s" alt="插图"/></div>' % (
-            prefix+image.id,html.escape(posixpath.relpath(picture_path(image),posixpath.dirname(path)),quote=True))
+        image_ref = posixpath.relpath(picture_path(image), posixpath.dirname(path))
+        if decision['rotation']:
+            picture = svg_image(image, image_ref, decision['rotation'])
+            svg_paths.add(path)
+        else:
+            picture = '<img src="%s" alt="插图"/>' % html.escape(image_ref, quote=True)
+        markup = '\n<div class="illust" id="%s">%s</div>' % (prefix + image.id, picture)
         patches[(path,offset)].append(markup)
     by_path=defaultdict(list)
     for (path,offset),markups in patches.items():
@@ -94,6 +101,11 @@ def build_preserved(book, donor, settings, validated):
         for offset,payload in sorted(changes,key=lambda x:x[0],reverse=True):
             content=content[:offset]+payload+content[offset:]
         replacements[path]=content
+    for element in manifest:
+        if source.resolve(source.opf_path, element.get('href', '')) in svg_paths:
+            properties = element.get('properties', '').split()
+            if 'svg' not in properties:
+                element.set('properties', ' '.join(properties + ['svg']))
 
     old_cover_docs, old_cover_ids = set(), set()
     for path, _, blocks in source.documents():
@@ -121,14 +133,17 @@ def build_preserved(book, donor, settings, validated):
     for image in art_images:
         role = '封面' if image is cover else '卷首插图'
         path = posixpath.join(base, 'Text', prefix + image.id + '.xhtml')
-        image_ref = html.escape(posixpath.relpath(picture_path(image), posixpath.dirname(path)), quote=True)
+        image_ref = posixpath.relpath(picture_path(image), posixpath.dirname(path))
+        rotation = decisions[image.id]['rotation']
+        picture = (svg_image(image, image_ref, rotation, role, full_page=True) if rotation else
+                   '<img src="%s" alt="%s"/>' % (html.escape(image_ref, quote=True), role))
         css_ref = html.escape(posixpath.relpath(css_path, posixpath.dirname(path)), quote=True)
         content = ('<?xml version="1.0" encoding="utf-8"?><html xmlns="%s" xml:lang="zh-CN" lang="zh-CN">'
                    '<head><title>%s</title><link href="%s" rel="stylesheet" type="text/css"/></head>'
-                   '<body><div class="%s"><img src="%s" alt="%s"/></div></body></html>') % (
-                       XHTML, role, css_ref, 'cover' if image is cover else 'illust', image_ref, role)
+                   '<body><div class="%s">%s</div></body></html>') % (
+                       XHTML, role, css_ref, 'cover' if image is cover else 'illust', picture)
         extra[path] = content.encode('utf-8')
-        item(prefix + 'page_' + image.id, path, 'application/xhtml+xml')
+        item(prefix + 'page_' + image.id, path, 'application/xhtml+xml', 'svg' if rotation else '')
         leading.append((prefix + 'page_' + image.id, path, role))
     insertion = 0
     if not cover and old_cover_docs:

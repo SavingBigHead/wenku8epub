@@ -11,6 +11,7 @@ from collections import defaultdict
 from .locations import START, chapter_start, chapter_end, valid_locations, location_label, boundary_index, canonical_location
 from .edits import apply_edits, paragraph_content
 from .image_order import prepare_images
+from .image_rotation import rotation_value, valid_dimensions, svg_image
 from .books import BookError
 from .presentation import prepare_epub
 from .metadata import normalize_volumes, metadata_values, write_metadata
@@ -47,20 +48,24 @@ def validate(book, donor, settings, prepared=False):
     if not isinstance(raw, list) or len(raw) != len(donor.illustrations):
         raise BookError('插图设置不完整。')
     ids = {x.id for x in donor.illustrations}
+    image_by_id = {x.id: x for x in donor.illustrations}
     by_id = {}
     paragraph_ids = valid_locations(book)
     for item in raw:
-        if not isinstance(item, dict) or item.get('id') not in ids or item['id'] in by_id:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or item['id'] not in ids or item['id'] in by_id:
             raise BookError('项目含无效或重复的插图 ID。')
         role = item.get('role')
         if role not in {'cover', 'front', 'body', 'ignore'}:
             raise BookError('插图类型无效。')
+        rotation = rotation_value(item)
+        if rotation and role != 'ignore' and not valid_dimensions(image_by_id[item['id']]):
+            raise BookError('无法读取图片 %s 的有效尺寸，请换用尺寸可识别的图片后再旋转。' % item['id'])
         if role == 'body':
             if item.get('after_id') not in paragraph_ids:
                 raise BookError('请为每张正文插图指定有效的位置，或将其设为忽略。')
             if item.get('confirmed') is not True:
                 raise BookError('仍有未确认的正文插图，请先校对或忽略后再导出。')
-        by_id[item['id']] = item
+        by_id[item['id']] = {**item, 'rotation': rotation}
     if sum(item['role'] == 'cover' for item in by_id.values()) > 1:
         raise BookError('只能选择一张封面，请将其余封面改为卷首图或忽略。')
     title = normalize_volumes(str(settings.get('title', book.title)).strip())[:300]
@@ -76,7 +81,7 @@ def initial_settings(book, donor):
         'version': 1, 'layout': 'mojimoon' if book.source_epub else 'rebuild', 'text_fingerprint': book.fingerprint, 'donor_fingerprint': donor.fingerprint,
         'title': normalize_volumes(book.title), 'author': book.author, 'text_edits': [], 'added_images': [], 'image_order': [x.id for x in donor.illustrations],
         **metadata_values(book, {}),
-        'images': [{k: getattr(image, k) for k in ['id', 'role', 'after_id', 'confirmed']} for image in donor.illustrations],
+        'images': [{**{k: getattr(image, k) for k in ['id', 'role', 'after_id', 'confirmed']}, 'rotation': 0} for image in donor.illustrations],
     }
 
 
@@ -111,11 +116,8 @@ def build_epub(book, donor, settings):
     def add_art(image, label):
         path = 'text/' + image.id + '.xhtml'
         src = '../images/' + image.id + '.' + image.ext
-        if image.width and image.height:
-            body = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
-                    'version="1.1" viewBox="0 0 %d %d" preserveAspectRatio="xMidYMid meet" role="img" aria-label="%s">'
-                    '<title>%s</title><image width="%d" height="%d" xlink:href="%s"/></svg>') % (
-                        image.width, image.height, escape(label), escape(label), image.width, image.height, escape(src))
+        if valid_dimensions(image):
+            body = svg_image(image, src, decisions[image.id]['rotation'], label, full_page=True)
             properties = 'svg'
         else:
             body, properties = '<img src="%s" alt="%s"/>' % (escape(src), escape(label)), ''
@@ -133,21 +135,30 @@ def build_epub(book, donor, settings):
         add_art(image, '正文前插图')
     for chapter in book.chapters:
         chunk = ['<h1>' + escape(chapter.title) + '</h1>']
+        chunk_svg = False
         segment = 0
         first_path = None
 
         def flush():
-            nonlocal chunk, segment, first_path
+            nonlocal chunk, chunk_svg, segment, first_path
             if not chunk:
                 return
             segment += 1
             path = 'text/%s-%03d.xhtml' % (chapter.id, segment)
             first_path = first_path or path
-            parts.append((path, document(chapter.title, ''.join(chunk)), ''))
+            parts.append((path, document(chapter.title, ''.join(chunk)), 'svg' if chunk_svg else ''))
             chunk = []
+            chunk_svg = False
 
         def inline_art(image):
-            chunk.append('<div class="illust"><img src="../images/%s.%s" alt="插图"/></div>' % (image.id,image.ext))
+            nonlocal chunk_svg
+            src = '../images/%s.%s' % (image.id, image.ext)
+            rotation = decisions[image.id]['rotation']
+            if rotation:
+                chunk.append('<div class="illust">' + svg_image(image, src, rotation) + '</div>')
+                chunk_svg = True
+            else:
+                chunk.append('<div class="illust"><img src="%s" alt="插图"/></div>' % src)
         for image in by_anchor[chapter_start(chapter.id)]: inline_art(image)
         for paragraph in chapter.paragraphs:
             scene = bool(paragraph.text.strip()) and bool(re.fullmatch(r'[\s＊*※◇◆☆★○●—─…·・\-]+', paragraph.text))
@@ -234,17 +245,17 @@ def build_report(book, donor, settings):
             if index < previous:
                 warning = '（已人工调整为与插图源不同的先后顺序）'
             previous = index
-        rows.append('<tr><td>%s<br/><small>%s</small></td><td>%s</td><td>%s %s</td><td>%s</td></tr>' % (
+        rows.append('<tr><td>%s<br/><small>%s</small></td><td>%s</td><td>%s %s</td><td>%s°</td><td>%s</td></tr>' % (
             escape(image.id), escape(image.source_path), labels[decision['role']], escape(location), escape(warning),
-            escape('%.2f' % image.score)))
+            decision['rotation'], escape('%.2f' % image.score)))
     return ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>%s · 合并记录</title>'
             '<style>body{max-width:1100px;margin:40px auto;padding:0 20px;font:16px/1.7 system-ui;color:#263634}'
             'table{border-collapse:collapse;width:100%%}td,th{text-align:left;padding:14px;border:1px solid #d4dedb;vertical-align:top}'
             'small{word-break:break-all}code{overflow-wrap:anywhere}</style><h1>%s · 合并记录</h1>'
             '<p>作者：%s<br/>正文：%s<br/>插图：%s</p><p>正文 SHA-256：<code>%s</code><br/>插图源 SHA-256：<code>%s</code></p>'
-            '<p>正文 %d 段；图片保持源文件字节。匹配分数是文本相似度，不是准确率。正文插图均由用户确认。同一位置的图片按本记录出现顺序插入。</p>'
+            '<p>正文 %d 段；图片保持源文件字节，旋转通过展示层实现，角度按顺时针记录。匹配分数是文本相似度，不是准确率。正文插图均由用户确认。同一位置的图片按本记录出现顺序插入。</p>'
             '<p>段落修改记录：%d 条（已应用于导出的正文）。<br/>章节标题修改记录：%d 条（已同步正文与目录）。</p>'
-            '<table><tr><th>图片</th><th>用途</th><th>插入位置</th><th>原始建议分数</th></tr>%s</table></html>') % (
+            '<table><tr><th>图片</th><th>用途</th><th>插入位置</th><th>旋转角度</th><th>原始建议分数</th></tr>%s</table></html>') % (
                 escape(title), escape(title), escape(author), escape(book.filename), escape(donor.filename),
                 book.fingerprint, donor.fingerprint, len(book.paragraphs), sum(e['op'] != 'rename_chapter' for e in settings.get('text_edits', [])),
                 sum(e['op'] == 'rename_chapter' for e in settings.get('text_edits', [])), ''.join(rows))
