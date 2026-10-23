@@ -665,7 +665,7 @@ def parse_donor(data, filename):
         raise BookError('没有提取到可用插图；请使用含内嵌图片的 EPUB。')
     if not prose_count:
         warnings.append('插图源缺少可匹配的中文正文，无法自动定位；请使用中文／双语 EPUB，或手动选择位置。')
-    warnings.append('图片保持原始字节，不压缩、不去水印；图片前后文字仅用于定位，不写入最终正文。')
+    warnings.append('未旋转图片保持原始字节；旋转 JPEG 优先无损处理，必要时旋转像素并无损保存为 PNG，不去水印；图片前后文字仅用于定位，不写入最终正文。')
     return DonorBook(book.title or filename, filename, hashlib.sha256(data).hexdigest(), illustrations, warnings)
 
 

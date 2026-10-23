@@ -1,10 +1,12 @@
-"""Black-box rotation contract: keep source pixels, rotate only SVG presentation."""
+"""Export bitmap pixels clockwise; retain vector rotation and project originals."""
 import base64
 import copy
 import hashlib
 import io
 import json
 import re
+import shutil
+import subprocess
 import threading
 import unittest
 import urllib.error
@@ -15,7 +17,9 @@ from html.parser import HTMLParser
 from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
-from epub_merge.books import BookError, Epub, parse_donor, parse_text
+from PIL import Image, ImageOps
+
+from epub_merge.books import BookError, Epub, parse_donor, parse_text, image_info
 from epub_merge.demo import demo_files, mojimoon_demo_files
 from epub_merge.export import build_epub, build_report, initial_settings, validate
 from epub_merge.image_order import prepare_images
@@ -67,7 +71,7 @@ class ImageRotationTests(unittest.TestCase):
             'mojimoon': parse_text(text, 'base.epub'),
         }
         cls.art = parse_donor(art, 'donor.epub')
-        cls.png_data = png()  # Non-square 24 x 32, no image-processing dependency.
+        cls.png_data = png()  # Non-square 24 x 32 local-image fixture.
 
     def project(self, layout, local=False):
         book, donor = copy.deepcopy((self.fixtures[layout], self.art))
@@ -110,6 +114,8 @@ class ImageRotationTests(unittest.TestCase):
         return found
 
     def assert_rotation(self, result, data, width, height, angle):
+        if image_info(data)[0] != 'image/svg+xml':
+            return self.assert_raster_rotation(result, data, angle)
         asset = self.asset(result, data)
         refs = self.references(result, asset)
         self.assertEqual(len(refs), 1, 'Each selected image must be rendered exactly once')
@@ -133,6 +139,274 @@ class ImageRotationTests(unittest.TestCase):
         item = next(item for item in result.manifest.values() if item['path'] == path)
         self.assertEqual(item.get('properties', '').split().count('svg'), 1)
         return path, asset
+
+
+    def assert_raster_rotation(self, result, data, angle, jpeg=None):
+        with Image.open(io.BytesIO(data)) as source:
+            if jpeg is None: jpeg = 'either' if source.format == 'JPEG' else False
+            pixels = source.convert('RGBA')
+            width, height = pixels.size
+            # Independent coordinate mapping, so reversed turns cannot pass.
+            size = (height, width) if angle in (90, 270) else (width, height)
+            expected = Image.new('RGBA', size)
+            for y in range(height):
+                for x in range(width):
+                    target = {90: (height - 1 - y, x),
+                              180: (width - 1 - x, height - 1 - y),
+                              270: (y, width - 1 - x)}[angle]
+                    expected.putpixel(target, pixels.getpixel((x, y)))
+        return self.assert_bitmap_resource(result, expected, jpeg=jpeg)
+
+    def assert_bitmap_resource(self, result, expected, jpeg=False):
+        matches = []
+        formats = ('image/jpeg', 'image/png') if jpeg == 'either' else ('image/jpeg' if jpeg else 'image/png',)
+        for item in result.manifest.values():
+            if item.get('media-type') not in formats: continue
+            encoded_jpeg = item['media-type'] == 'image/jpeg'
+            with Image.open(io.BytesIO(result.read(item['path']))) as image:
+                if image.size != expected.size: continue
+                actual = image.convert('RGBA')
+                if encoded_jpeg:
+                    # DCT transforms can change RGB rounding; coefficients are checked separately.
+                    errors = [abs(a - b) for a, b in zip(actual.tobytes(), expected.tobytes())]
+                    matches_pixels = max(errors) <= 24 and sum(errors) / len(errors) <= 6
+                else:
+                    matches_pixels = actual.tobytes() == expected.tobytes()
+                if matches_pixels:
+                    self.assertEqual(image.format, 'JPEG' if encoded_jpeg else 'PNG')
+                    self.assertNotIn(274, image.getexif(), 'EXIF must not rotate exported pixels again')
+                    matches.append((item['path'], encoded_jpeg))
+        self.assertEqual(len(matches), 1, 'Expected one resource with physically rotated pixels')
+        asset, encoded_jpeg = matches[0]
+        self.assertTrue(asset.endswith('.jpg' if encoded_jpeg else '.png'))
+        refs = self.references(result, asset)
+        self.assertEqual(len(refs), 1)
+        path, root, image = refs[0]
+        self.assertEqual(image.tag, '{http://www.w3.org/1999/xhtml}img')
+        self.assertIsNone(image.get('transform'))
+        parents = {child: parent for parent in root.iter() for child in parent}
+        parent = parents.get(image)
+        while parent is not None:
+            self.assertFalse(parent.tag.startswith('{%s}' % SVG))
+            parent = parents.get(parent)
+        return path, asset
+
+    @staticmethod
+    def bitmap_data(format='PNG', mode='RGB', exif=None):
+        image = Image.new('RGB', (3, 2))
+        image.putdata([(255, 0, 0), (0, 255, 0), (0, 0, 255),
+                       (255, 255, 0), (255, 0, 255), (0, 255, 255)])
+        image = image.convert(mode)
+        if mode == 'RGBA':
+            image.putpixel((0, 0), (255, 0, 0, 37))
+        output = io.BytesIO()
+        options = {'exif': exif} if exif else {}
+        if format == 'WEBP': options['lossless'] = True
+        image.save(output, format=format, **options)
+        return output.getvalue()
+
+    def test_raster_pixels_cover_resource_and_markup_in_both_exporters(self):
+        for layout in self.fixtures:
+            for format, mode in [('JPEG', 'RGB'), ('JPEG', 'CMYK'), ('PNG', 'RGBA'),
+                                 ('PNG', 'RGB'), ('GIF', 'P'), ('WEBP', 'RGBA')]:
+                data = self.bitmap_data(format, mode)
+                media, ext, width, height = image_info(data)
+                for role in ('cover', 'front', 'body'):
+                    for angle in (90, 180, 270):
+                        with self.subTest(layout=layout, format=format, mode=mode, role=role, angle=angle):
+                            book, donor, settings = self.project(layout)
+                            donor.illustrations[0] = replace(donor.illustrations[0], data=data,
+                                media_type=media, ext=ext, width=width, height=height)
+                            settings['images'][0].update(role=role, rotation=angle,
+                                after_id=book.paragraphs[2].id)
+                            snapshot = copy.deepcopy((donor, settings))
+                            result = Epub(build_epub(book, donor, settings))
+                            _, asset = self.assert_raster_rotation(result, data, angle)
+                            if role == 'cover':
+                                self.assertEqual(result.cover_path, asset)
+                            self.assertEqual((donor, settings), snapshot)
+
+    def test_raster_chapter_and_title_page_anchors_use_plain_images(self):
+        for layout in self.fixtures:
+            book, donor, settings = self.project(layout, local=True)
+            anchors = [START, chapter_start(book.chapters[0].id), chapter_end(book.chapters[0].id)]
+            if book.pages: anchors += [page_start(book.pages[0]['id']), page_end(book.pages[0]['id'])]
+            for anchor in anchors:
+                with self.subTest(layout=layout, anchor=anchor):
+                    self.decision(settings, 'local_rotation').update(
+                        role='body', rotation=90, after_id=anchor)
+                    result = Epub(build_epub(book, donor, settings))
+                    self.assert_raster_rotation(result, self.png_data, 90)
+
+    def test_jpeg_exif_orientation_is_applied_once_before_user_rotation(self):
+        # Row-major index orders for EXIF orientations, including reflections.
+        orders = {1: [0, 1, 2, 3, 4, 5], 2: [2, 1, 0, 5, 4, 3],
+                  3: [5, 4, 3, 2, 1, 0], 4: [3, 4, 5, 0, 1, 2],
+                  5: [0, 3, 1, 4, 2, 5], 6: [3, 0, 4, 1, 5, 2],
+                  7: [5, 2, 4, 1, 3, 0], 8: [2, 5, 1, 4, 0, 3]}
+        for orientation, order in orders.items():
+            exif = Image.Exif()
+            exif[274] = orientation
+            data = self.bitmap_data('JPEG', exif=exif)
+            media, ext, width, height = image_info(data)
+            with Image.open(io.BytesIO(data)) as source:
+                pixels = list(source.convert('RGBA').get_flattened_data())
+            oriented = Image.new('RGBA', (2, 3) if orientation >= 5 else (3, 2))
+            oriented.putdata([pixels[index] for index in order])
+            expected_buffer = io.BytesIO()
+            oriented.save(expected_buffer, format='PNG')
+            for layout in self.fixtures:
+                for angle in (90, 180, 270):
+                    with self.subTest(layout=layout, orientation=orientation, angle=angle):
+                        book, donor, settings = self.project(layout)
+                        donor.illustrations[0] = replace(donor.illustrations[0], data=data,
+                            media_type=media, ext=ext, width=width, height=height)
+                        settings['images'][0].update(role='cover', rotation=angle)
+                        with patch('epub_merge.image_rotation.shutil.which', return_value=None):
+                            result = Epub(build_epub(book, donor, settings))
+                        self.assert_raster_rotation(result, expected_buffer.getvalue(), angle, jpeg=False)
+
+    def test_animated_and_broken_rotated_bitmaps_fail_without_changing_originals(self):
+        frames = [Image.new('RGB', (3, 2), color) for color in ('red', 'blue')]
+        output = io.BytesIO()
+        frames[0].save(output, format='GIF', save_all=True, append_images=frames[1:],
+                       duration=100, loop=0)
+        for layout in self.fixtures:
+            for data, error in [(output.getvalue(), '动图'), (self.png_data[:24], '无法旋转')]:
+                with self.subTest(layout=layout, error=error):
+                    media, ext, width, height = image_info(data)
+                    book, donor, settings = self.project(layout)
+                    donor.illustrations[0] = replace(donor.illustrations[0], data=data,
+                        media_type=media, ext=ext, width=width, height=height)
+                    settings['images'][0].update(role='cover', rotation=90)
+                    snapshot = copy.deepcopy((donor, settings))
+                    with self.assertRaisesRegex(BookError, error):
+                        build_epub(book, donor, settings)
+                    self.assertEqual((donor, settings), snapshot)
+                    settings['images'][0]['rotation'] = 0
+                    result = Epub(build_epub(book, donor, settings))
+                    self.assertEqual(result.read(result.cover_path), data)
+
+
+    @staticmethod
+    def aligned_jpeg(mode='RGB', orientation=1):
+        image = Image.new('RGB', (32, 16))
+        colors = [(220, 20, 30), (20, 210, 40), (30, 40, 220), (210, 190, 20)]
+        for y in range(image.height):
+            for x in range(image.width):
+                image.putpixel((x, y), colors[(x // 8 + y // 8) % len(colors)])
+        image = image.convert(mode)
+        exif = Image.Exif()
+        exif[274] = orientation
+        output = io.BytesIO()
+        image.save(output, format='JPEG', quality=90, subsampling=0, exif=exif,
+                   icc_profile=b'rotation-test-profile')
+        return output.getvalue()
+
+    def jpeg_project(self, data, angle=90, layout='generic'):
+        book, donor, settings = self.project(layout)
+        media, ext, width, height = image_info(data)
+        donor.illustrations[0] = replace(donor.illustrations[0], data=data,
+            media_type=media, ext=ext, width=width, height=height)
+        settings['images'][0].update(role='cover', rotation=angle)
+        return book, donor, settings
+
+    @unittest.skipUnless(shutil.which('jpegtran'), 'Optional jpegtran is unavailable')
+    def test_perfect_jpeg_rotation_preserves_coefficients_without_pixel_encoding(self):
+        executable = shutil.which('jpegtran')
+        for mode in ('RGB', 'L', 'CMYK'):
+            for angle in (90, 180, 270):
+                for layout in self.fixtures:
+                    with self.subTest(mode=mode, angle=angle, layout=layout):
+                        data = self.aligned_jpeg(mode)
+                        project = self.jpeg_project(data, angle, layout)
+                        with patch('epub_merge.image_rotation.ImageOps.exif_transpose',
+                                   side_effect=AssertionError('Lossless rotation must not decode pixels')):
+                            result = Epub(build_epub(*project))
+                        rotated = result.read(result.cover_path)
+                        self.assert_raster_rotation(result, data, angle, jpeg=True)
+                        with Image.open(io.BytesIO(rotated)) as output:
+                            self.assertEqual(output.mode, mode)
+                            self.assertEqual(output.info.get('icc_profile'), b'rotation-test-profile')
+                        # Canonical Huffman coding makes an inverse transform
+                        # byte-identical iff the quantized coefficients survived.
+                        common = [executable, '-copy', 'icc', '-perfect', '-optimize']
+                        restored = subprocess.run(common + ['-rotate', str(360 - angle)],
+                            input=rotated, capture_output=True, check=True).stdout
+                        canonical = subprocess.run(common, input=data, capture_output=True, check=True).stdout
+                        self.assertEqual(restored, canonical)
+
+    @unittest.skipUnless(shutil.which('jpegtran'), 'Optional jpegtran is unavailable')
+    def test_perfect_jpeg_composes_all_exif_orientations_without_reencoding(self):
+        for orientation in range(1, 9):
+            data = self.aligned_jpeg(orientation=orientation)
+            with Image.open(io.BytesIO(data)) as source:
+                # Pillow supplies the independent reference for all reflections.
+                oriented = ImageOps.exif_transpose(source)
+                buffer = io.BytesIO()
+                oriented.save(buffer, format='PNG')
+            for angle in (90, 180, 270):
+                with self.subTest(orientation=orientation, angle=angle):
+                    with patch('epub_merge.image_rotation.ImageOps.exif_transpose',
+                               side_effect=AssertionError('Expected a combined lossless transform')):
+                        result = Epub(build_epub(*self.jpeg_project(data, angle)))
+                    self.assert_raster_rotation(result, buffer.getvalue(), angle, jpeg=True)
+
+    @unittest.skipUnless(shutil.which('jpegtran'), 'Optional jpegtran is unavailable')
+    def test_imperfect_jpeg_blocks_fall_back_without_cropping(self):
+        data = self.bitmap_data('JPEG')  # 3 x 2: cannot rotate the full MCU perfectly.
+        for angle in (90, 180, 270):
+            with self.subTest(angle=angle):
+                with patch('epub_merge.image_rotation.ImageOps.exif_transpose',
+                           wraps=ImageOps.exif_transpose) as decoded:
+                    result = Epub(build_epub(*self.jpeg_project(data, angle)))
+                    decoded.assert_called_once()
+                self.assert_raster_rotation(result, data, angle, jpeg=False)
+
+    def test_missing_failed_timed_out_and_invalid_tool_output_use_png_fallback(self):
+        data = self.aligned_jpeg()
+        cases = {
+            'missing': None,
+            'failure': subprocess.CompletedProcess([], 1, b'', b'not perfect'),
+            'bad output': subprocess.CompletedProcess([], 0, b'broken', b''),
+            'wrong dimensions': subprocess.CompletedProcess([], 0, data, b''),
+            'timeout': subprocess.TimeoutExpired('jpegtran', 30),
+            'disappeared': FileNotFoundError('jpegtran'),
+        }
+        for name, response in cases.items():
+            with self.subTest(reason=name):
+                with patch('epub_merge.image_rotation.shutil.which',
+                           return_value=None if name == 'missing' else '/tools/jpegtran'), \
+                     patch('epub_merge.image_rotation.subprocess.run') as run, \
+                     patch('epub_merge.image_rotation.ImageOps.exif_transpose',
+                           wraps=ImageOps.exif_transpose) as decoded:
+                    if isinstance(response, Exception):
+                        run.side_effect = response
+                    else:
+                        run.return_value = response
+                    result = Epub(build_epub(*self.jpeg_project(data)))
+                    decoded.assert_called_once()
+                    if name == 'missing':
+                        run.assert_not_called()
+                    else:
+                        command = run.call_args.args[0]
+                        self.assertIn('-perfect', command)
+                        self.assertNotIn('-trim', command)
+                    self.assert_raster_rotation(result, data, 90, jpeg=False)
+                    with Image.open(io.BytesIO(result.read(result.cover_path))) as output:
+                        self.assertEqual(output.info.get('icc_profile'), b'rotation-test-profile')
+
+    def test_zero_and_ignored_jpegs_never_invoke_transform_tools(self):
+        data = self.aligned_jpeg()
+        for role, angle in [('cover', 0), ('ignore', 90)]:
+            with self.subTest(role=role):
+                book, donor, settings = self.jpeg_project(data, angle)
+                settings['images'][0]['role'] = role
+                with patch('epub_merge.image_rotation.subprocess.run',
+                           side_effect=AssertionError('Unexpected transform')):
+                    result = Epub(build_epub(book, donor, settings))
+                if role == 'cover':
+                    self.assertEqual(result.read(result.cover_path), data)
 
     @staticmethod
     def events(result, only_path=None):

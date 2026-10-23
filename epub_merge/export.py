@@ -11,7 +11,7 @@ from collections import defaultdict
 from .locations import START, chapter_start, chapter_end, valid_locations, location_label, boundary_index, canonical_location
 from .edits import apply_edits, paragraph_content
 from .image_order import prepare_images
-from .image_rotation import rotation_value, valid_dimensions, svg_image
+from .image_rotation import rotation_value, valid_dimensions, svg_image, export_images
 from .books import BookError
 from .presentation import prepare_epub
 from .metadata import normalize_volumes, metadata_values, write_metadata
@@ -95,10 +95,11 @@ def document(title, body, art=False):
 def build_epub(book, donor, settings):
     book = apply_edits(book, settings)
     donor = prepare_images(donor, settings)
+    decisions, title, author = validate(book, donor, settings, prepared=True)
+    donor, decisions = export_images(donor, decisions)
     if book.source_epub is not None:
         from .preserve import build_preserved
-        return prepare_epub(build_preserved(book, donor, settings, validate(book, donor, settings, prepared=True)))
-    decisions, title, author = validate(book, donor, settings, prepared=True)
+        return prepare_epub(build_preserved(book, donor, settings, (decisions, title, author)))
     parts, assets, navigation = [], [], []
     by_anchor = defaultdict(list)
     cover = None
@@ -116,7 +117,7 @@ def build_epub(book, donor, settings):
     def add_art(image, label):
         path = 'text/' + image.id + '.xhtml'
         src = '../images/' + image.id + '.' + image.ext
-        if valid_dimensions(image):
+        if image.media_type == 'image/svg+xml' and valid_dimensions(image):
             body = svg_image(image, src, decisions[image.id]['rotation'], label, full_page=True)
             properties = 'svg'
         else:
@@ -253,7 +254,7 @@ def build_report(book, donor, settings):
             'table{border-collapse:collapse;width:100%%}td,th{text-align:left;padding:14px;border:1px solid #d4dedb;vertical-align:top}'
             'small{word-break:break-all}code{overflow-wrap:anywhere}</style><h1>%s · 合并记录</h1>'
             '<p>作者：%s<br/>正文：%s<br/>插图：%s</p><p>正文 SHA-256：<code>%s</code><br/>插图源 SHA-256：<code>%s</code></p>'
-            '<p>正文 %d 段；图片保持源文件字节，旋转通过展示层实现，角度按顺时针记录。匹配分数是文本相似度，不是准确率。正文插图均由用户确认。同一位置的图片按本记录出现顺序插入。</p>'
+            '<p>正文 %d 段；未旋转图片保持源文件字节；旋转 JPEG 优先无损变换，无法无损变换时旋转像素并无损保存为 PNG；其他旋转位图无损保存为 PNG，SVG 仍通过展示层旋转。角度按顺时针记录。匹配分数是文本相似度，不是准确率。正文插图均由用户确认。同一位置的图片按本记录出现顺序插入。</p>'
             '<p>段落修改记录：%d 条（已应用于导出的正文）。<br/>章节标题修改记录：%d 条（已同步正文与目录）。</p>'
             '<table><tr><th>图片</th><th>用途</th><th>插入位置</th><th>旋转角度</th><th>原始建议分数</th></tr>%s</table></html>') % (
                 escape(title), escape(title), escape(author), escape(book.filename), escape(donor.filename),

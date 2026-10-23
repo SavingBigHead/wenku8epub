@@ -247,7 +247,7 @@ function updateSummary() {
   const included = images.filter(x => x.role !== 'ignore').length;
   $('reviewCount').textContent = bodies.length + ' 张正文插图 · ' + pending + ' 张待确认';
   $('exportStatus').textContent = pending ? '还有 ' + pending + ' 张正文插图需要确认' : '已就绪，可以重新装订';
-  $('exportHint').textContent = pending ? '核对图片前后文，确认建议位置，或手动选择一段之后插入。' : (state.text.layout === 'mojimoon' ? '保留 mojimoon 原排版与目录' : '保留中文正文 · 统一排版') + ' · 包含 ' + included + ' 张图片 · 原图不压缩';
+  $('exportHint').textContent = pending ? '核对图片前后文，确认建议位置，或手动选择一段之后插入。' : (state.text.layout === 'mojimoon' ? '保留 mojimoon 原排版与目录' : '保留中文正文 · 统一排版') + ' · 包含 ' + included + ' 张图片 · JPEG 旋转优先无损处理';
   $('export').disabled = busy || pending > 0;
   $('report').disabled = busy || pending > 0;
   $('acceptAll').disabled = busy || !bodies.some(x => x.after_id && !x.confirmed);
