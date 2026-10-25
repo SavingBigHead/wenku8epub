@@ -72,8 +72,15 @@ def decode_download(data):
 
 def clean_text(text):
     """Restore HTML entities and remove standalone numbered illustration markers."""
-    return ''.join(line for line in unescape(text).splitlines(keepends=True)
-                   if not re.fullmatch(r'插[图圖][ \t　\xa0]*[0-9０-９]+',line.strip()))
+    lines=[]
+    for line in unescape(text).splitlines(keepends=True):
+        marker=line.strip()
+        if (marker.startswith('（') and marker.endswith('）') or
+                marker.startswith('【') and marker.endswith('】')):
+            marker=marker[1:-1].strip()
+        if not re.fullmatch(r'插[图圖][ \t　\xa0]*[0-9０-９]+',marker):
+            lines.append(line)
+    return ''.join(lines)
 
 
 def clean_download(data):

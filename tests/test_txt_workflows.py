@@ -50,7 +50,7 @@ class TxtConversionTests(unittest.TestCase):
 
     def test_local_epub_uses_same_cleanup_across_encodings(self):
         text = ('  插图001\n第一章 甲&#8231;乙\n    姓名&#8231;中点 &amp; &lt;符号&gt;𠀀😀。\n'
-                '　插圖 ００２　\n    请参见插图003。\n第二章 后续\n插图004\n    后续&#x2027;正文。')
+                '　插圖 ００２　\n（插图001）\n【插图008】\n    请参见插图003。\n第二章 后续\n插图004\n    后续&#x2027;正文。')
         for encoding in ['utf-8','utf-8-sig','utf-16','gb18030']:
             with self.subTest(encoding=encoding):
                 data, filename, info = convert_txt(text.encode(encoding),'测试 第01卷.txt')
@@ -118,8 +118,19 @@ class TxtCleaningTests(unittest.TestCase):
     def test_preserves_illustration_mentions_titles_and_other_numbered_prose(self):
         text = ('  插图\n插圖\n    请参见插图001。\n    插图002是本章内容。\n'
                 '    「插图003」\n    插图004 说明\n    插图ABC\n    001\n'
+                '    （插图）\n    【插圖】\n    请参见（插图001）。\n    【插图008】说明\n'
+                '    （插图001 说明）\n    【插图ABC】\n    （插图001】\n    【插图008）\n'
+                '    （插图001\n    插图008】\n'
                 ' ★☆轻小说文库(Www.WenKu8.com)☆★ \n    转自 测试来源\n')
         self.assertEqual(clean_download(text.encode()),text.encode())
+
+    def test_removes_whole_illustration_lines_with_matching_brackets(self):
+        for marker in ['（插图001）','【插图008】','　（ 插圖 ００２ ）　',
+                       '\t【\t插图 003\t】\t','&#65288;插图001&#65289;',
+                       '&#12304;插图008&#12305;']:
+            with self.subTest(marker=marker):
+                source = '  正文。\r\n'+marker+'\r\n    后文。\n'+marker
+                self.assertEqual(clean_download(source.encode()).decode(),'  正文。\r\n    后文。\n')
 
     def test_preserves_bom_byte_order_line_endings_and_surviving_whitespace(self):
         encodings = [('utf-8',b''),('utf-8',b'\xef\xbb\xbf'),
@@ -127,7 +138,7 @@ class TxtCleaningTests(unittest.TestCase):
         for encoding,bom in encodings:
             for newline in ['\n','\r\n','\r']:
                 with self.subTest(encoding=encoding,bom=bom,newline=newline):
-                    source = newline.join(['  第一章','    甲&#8231;乙𠀀😀。','　插图001　','\t 后文  ',''])
+                    source = newline.join(['  第一章','    甲&#8231;乙𠀀😀。','　插图001　','（插图001）','【插图008】','\t 后文  ',''])
                     expected = newline.join(['  第一章','    甲‧乙𠀀😀。','\t 后文  ',''])
                     self.assertEqual(clean_download(bom+source.encode(encoding)),bom+expected.encode(encoding))
                     plain = bom+expected.encode(encoding)
