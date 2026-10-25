@@ -732,7 +732,7 @@ async function generateFromWenku(format = 'epub') {
       $('txtEncoding').value = status.result.encoding === 'utf-16' ? 'utf-16' : 'utf-8';
       $('localTxtFile').closest('details').open = true;
       $('generateStatus').textContent = 'TXT 已保存，原始编码：' + status.result.encoding + '。也已填入下方，可直接生成无图 EPUB。';
-      toast('TXT 已保存，保留下载时的原始字节。');
+      toast('TXT 已保存，已还原字符实体并移除插图占位段落。');
     } else {
       useGeneratedFile(file);
       $('generateStatus').textContent = '无图底稿已就绪：' + status.result.title + '。选择同卷插图源后，点击「开始匹配」。';

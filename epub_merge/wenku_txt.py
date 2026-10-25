@@ -1,5 +1,6 @@
 """Fetch packed volume text; use website HTML only for metadata and the TOC."""
 import hashlib
+from html import unescape
 import json
 from pathlib import Path
 import re
@@ -69,6 +70,25 @@ def decode_download(data):
     return text,encoding
 
 
+def clean_text(text):
+    """Restore HTML entities and remove standalone numbered illustration markers."""
+    return ''.join(line for line in unescape(text).splitlines(keepends=True)
+                   if not re.fullmatch(r'插[图圖][ \t　\xa0]*[0-9０-９]+',line.strip()))
+
+
+def clean_download(data):
+    """Clean a saved TXT without changing its BOM, byte order or line endings."""
+    text,encoding=decode_download(data)
+    cleaned=clean_text(text)
+    if cleaned == text: return data
+    # Re-encoding as generic UTF-16 would change big-endian downloads to the
+    # platform's native byte order. Preserve the source BOM and byte order.
+    if encoding == 'utf-16':
+        bom=data[:2]
+        return bom+cleaned.encode('utf-16-be' if bom == b'\xfe\xff' else 'utf-16-le')
+    return cleaned.encode(encoding)
+
+
 def normalized(value):
     return re.sub(r'\s+','',unicodedata.normalize('NFKC',value))
 
@@ -134,7 +154,7 @@ def fetch_packed(fetcher, aid, volume, cache_root, update='', *, include_raw=Fal
     cached=data is not None
     if data is None: data=fetcher.get_bytes(url)
     text,encoding=decode_download(data)
-    chapters=split_chapters(text,volume) if parse_chapters else []
+    chapters=split_chapters(clean_text(text),volume) if parse_chapters else []
     if not cached:
         cache.parent.mkdir(parents=True,exist_ok=True)
         cache.with_suffix('.bin').write_bytes(data)

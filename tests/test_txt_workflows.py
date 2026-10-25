@@ -16,6 +16,7 @@ from epub_merge.local_txt import convert_txt
 from epub_merge.locations import page_start
 from epub_merge.server import make_server
 from epub_merge import wenku
+from epub_merge.wenku_txt import clean_download
 from epub_merge.presentation import NCX, XHTML
 
 
@@ -47,6 +48,35 @@ class TxtConversionTests(unittest.TestCase):
         self.assertEqual(info['chapters'],2)
         self.assertEqual(info['warnings'],[])
 
+    def test_local_epub_uses_same_cleanup_across_encodings(self):
+        text = ('  插图001\n第一章 甲&#8231;乙\n    姓名&#8231;中点 &amp; &lt;符号&gt;𠀀😀。\n'
+                '　插圖 ００２　\n    请参见插图003。\n第二章 后续\n插图004\n    后续&#x2027;正文。')
+        for encoding in ['utf-8','utf-8-sig','utf-16','gb18030']:
+            with self.subTest(encoding=encoding):
+                data, filename, info = convert_txt(text.encode(encoding),'测试 第01卷.txt')
+                parsed = parse_text(data,filename)
+                self.assertEqual([c.title for c in parsed.chapters],['第一章 甲‧乙','第二章 后续'])
+                self.assertEqual([p.text for p in parsed.paragraphs],['姓名‧中点 & <符号>𠀀😀。','请参见插图003。','后续‧正文。'])
+                self.assertEqual(info['chapters'],2)
+                self.assertEqual(info['paragraphs'],3)
+                self.assertFalse(any(v.get('media-type','').startswith('image/') for v in Epub(data).manifest.values()))
+
+    def test_local_packed_epub_cleans_before_detecting_headings(self):
+        text = (' ★☆轻小说文库(Www.WenKu8.com)☆★ \n'
+                '  插图001\n  第一卷 测试 一 甲&#8231;乙\n    台版 转自 来源\n'
+                '    正文&#8231;内容 &amp; &lt;符号&gt;。\n    插图002\n'
+                '  第一卷 测试 二 后续\n    插圖 ００３\n    请参见插图004。')
+        data, filename, info = convert_txt(text.encode('utf-16'),'测试 第01卷.txt')
+        parsed = parse_text(data,filename)
+        self.assertEqual([c.title for c in parsed.chapters],['一 甲‧乙','二 后续'])
+        self.assertEqual([p.text for p in parsed.paragraphs],['台版 转自 来源','正文‧内容 & <符号>。','请参见插图004。'])
+        self.assertEqual(info['warnings'],[])
+
+    def test_local_epub_rejects_text_with_only_illustration_markers(self):
+        for text in ['插图001\n插图002','第一章 开始\n    插图001\n    插圖００２']:
+            with self.subTest(text=text),self.assertRaises(BookError):
+                convert_txt(text.encode(),'测试.txt')
+
     def test_gbk_and_invalid_input(self):
         source = '第一章 开始\n文库正文。'.encode('gbk')
         for encoding in ['auto','gb18030']:
@@ -72,8 +102,45 @@ class TxtConversionTests(unittest.TestCase):
         self.assertEqual(point.find('{%s}navLabel/{%s}text'%(NCX,NCX)).text,'插图')
 
 
+class TxtCleaningTests(unittest.TestCase):
+    def test_decodes_numeric_hex_and_named_entities_without_stripping_text(self):
+        source = '姓名&#8231;中点&#x2027;分隔 &amp; &quot;引号&quot; &lt;正文&gt; &#x20000; &#128512;\n'
+        expected = '姓名‧中点‧分隔 & "引号" <正文> 𠀀 😀\n'
+        self.assertEqual(clean_download(source.encode()).decode(),expected)
+        self.assertEqual(clean_download('普通 & 未知 &unknown;'.encode()).decode(),'普通 & 未知 &unknown;')
+
+    def test_removes_only_whole_numbered_illustration_lines(self):
+        source = ('  第一章 开始\n    插图001\n\n\t插图002\t\n'
+                  '　插圖 ００３　\n&#32;插图&#48;04&#32;\n    正文。\n插图9999')
+        expected = '  第一章 开始\n\n    正文。\n'
+        self.assertEqual(clean_download(source.encode()).decode(),expected)
+
+    def test_preserves_illustration_mentions_titles_and_other_numbered_prose(self):
+        text = ('  插图\n插圖\n    请参见插图001。\n    插图002是本章内容。\n'
+                '    「插图003」\n    插图004 说明\n    插图ABC\n    001\n'
+                ' ★☆轻小说文库(Www.WenKu8.com)☆★ \n    转自 测试来源\n')
+        self.assertEqual(clean_download(text.encode()),text.encode())
+
+    def test_preserves_bom_byte_order_line_endings_and_surviving_whitespace(self):
+        encodings = [('utf-8',b''),('utf-8',b'\xef\xbb\xbf'),
+                     ('utf-16-le',b'\xff\xfe'),('utf-16-be',b'\xfe\xff')]
+        for encoding,bom in encodings:
+            for newline in ['\n','\r\n','\r']:
+                with self.subTest(encoding=encoding,bom=bom,newline=newline):
+                    source = newline.join(['  第一章','    甲&#8231;乙𠀀😀。','　插图001　','\t 后文  ',''])
+                    expected = newline.join(['  第一章','    甲‧乙𠀀😀。','\t 后文  ',''])
+                    self.assertEqual(clean_download(bom+source.encode(encoding)),bom+expected.encode(encoding))
+                    plain = bom+expected.encode(encoding)
+                    self.assertEqual(clean_download(plain),plain)
+
+    def test_preserves_mixed_line_endings_and_final_line_without_newline(self):
+        source = '开头\r\n插图001\r正文&#8231;。\n插图002\r\n结尾'
+        expected = '开头\r\n正文‧。\n结尾'
+        self.assertEqual(clean_download(source.encode()).decode(),expected)
+
+
 class RawTxtTests(unittest.TestCase):
-    def test_txt_download_is_byte_identical_without_epub_generation(self):
+    def test_unchanged_txt_is_byte_identical_without_epub_generation(self):
         raw = ' ★☆轻小说文库(Www.WenKu8.com)☆★ \n  一 开始\n    正文𠀀。'.encode('utf-16')
         class Fetcher:
             def get(self,url,validate=None,encoding=None):
@@ -89,6 +156,27 @@ class RawTxtTests(unittest.TestCase):
             self.assertTrue(result['filename'].endswith('第01卷.txt'))
             self.assertTrue(result['filename'].startswith('测试系列 '))
             self.assertEqual(result['author'],'测试作者')
+            self.assertFalse(list(Path(folder).rglob('*.epub')))
+
+    def test_saved_txt_is_cleaned_on_fresh_and_cached_downloads(self):
+        source = '  一 开始\r\n    姓名&#8231;中点 &amp; 正文𠀀。\r\n    插图001\r\n    插图002\r\n    请参见插图003。'
+        expected = '  一 开始\r\n    姓名‧中点 & 正文𠀀。\r\n    请参见插图003。'
+        raw = source.encode('utf-16')
+        fetcher = Mock()
+        fetcher.get.side_effect = lambda url,*args,**kwargs: (
+            '<title>测试系列 - 文库</title><div id="content">小说作者：测试作者<br/>内容简介：<br/>简介<br/>阅读<br/>小说目录</div>'
+            if '/book/' in url else '<td class="vcss" vid="50">第一卷</td><td class="ccss"><a href="51.htm">一 开始</a></td>')
+        fetcher.get_bytes.return_value = raw
+        with tempfile.TemporaryDirectory() as folder:
+            upstream = wenku.load_upstream()
+            with patch.object(upstream,'create_epub',side_effect=AssertionError('不能生成 EPUB')):
+                for _ in range(2):
+                    result = wenku.generate_no_images('1163',fetcher=fetcher,output_root=Path(folder)/'text',output_format='txt')
+                    self.assertEqual(Path(result['file']).read_bytes(),expected.encode('utf-16'))
+                    self.assertEqual(result['size'],len(expected.encode('utf-16')))
+                    self.assertEqual(result['encoding'],'utf-16')
+            fetcher.get_bytes.assert_called_once()
+            self.assertEqual((Path(folder)/'cache'/'1163'/'packtxt'/'50.bin').read_bytes(),raw)
             self.assertFalse(list(Path(folder).rglob('*.epub')))
 
     def test_raw_download_does_not_require_epub_chapter_splitting(self):

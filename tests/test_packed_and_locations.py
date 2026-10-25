@@ -84,6 +84,36 @@ class PackedTextTests(unittest.TestCase):
                 self.assertEqual(book.metadata['subjects'],['校园','悬疑'])
                 self.assertEqual(len(fetcher.urls),3)
 
+    def test_epub_cleans_downloads_and_cache_without_changing_raw_source(self):
+        raw = ('  插图\n    插图001\n  一 甲&#8231;乙\n'
+               '    正文&#8231;内容 &amp; &lt;符号&gt;𠀀😀。\n    插圖 ００２\n'
+               '    请参见插图003。\n  二 后续\n    插图004\n    下一章&#x2027;正文。').encode('utf-16')
+        fetcher = Mock()
+        fetcher.get.side_effect = lambda url,*args,**kwargs: (
+            '<title>测试系列 - 文库</title><div id="content">小说作者：作者<br/>内容简介：<br/>简介<br/>阅读<br/>小说目录</div>'
+            if '/book/' in url else '<td class="vcss" vid="50">第一卷 测试</td>'
+            '<td class="ccss"><a href="51.htm">插图</a></td>'
+            '<td class="ccss"><a href="52.htm">一 甲&#8231;乙</a></td>'
+            '<td class="ccss"><a href="53.htm">二 后续</a></td>')
+        fetcher.get_bytes.return_value = raw
+        with tempfile.TemporaryDirectory() as folder:
+            for _ in range(2):
+                result = wenku.generate_no_images('1163',fetcher=fetcher,output_root=Path(folder)/'text')
+                data = Path(result['file']).read_bytes()
+                book = parse_text(data,result['filename'])
+                self.assertEqual([c.title for c in book.chapters],['一 甲‧乙','二 后续'])
+                self.assertEqual([p.text for p in book.paragraphs],['正文‧内容 & <符号>𠀀😀。','请参见插图003。','下一章‧正文。'])
+                self.assertFalse(any(v.get('media-type','').startswith('image/') for v in Epub(data).manifest.values()))
+                self.assertEqual(result['encoding'],'utf-16')
+            fetcher.get_bytes.assert_called_once()
+            self.assertEqual((Path(folder)/'cache'/'1163'/'packtxt'/'50.bin').read_bytes(),raw)
+
+    def test_packed_epub_rejects_text_with_only_illustration_markers(self):
+        fetcher = Mock()
+        fetcher.get_bytes.return_value = '  一 开端\n    插图001\n  二 后续\n    插圖００２'.encode()
+        with tempfile.TemporaryDirectory() as folder,self.assertRaises(BookError):
+            fetch_packed(fetcher,1163,self.volume,Path(folder))
+
     def test_conflicting_download_link_and_vid_rejected(self):
         with self.assertRaises(BookError):
             wenku.generate_no_images('https://dl.wenku8.com/packtxt.php?aid=1163&vid=51',vid=52)

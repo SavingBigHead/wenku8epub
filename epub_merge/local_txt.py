@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from .books import BookError, MAX_FILE, MAX_PARAGRAPHS, decode_text, parse_text, Epub
 from .metadata import metadata_values, normalize_volumes, volume_title, VOLUME, write_metadata
 from .presentation import prepare_epub, serialize_xml
-from .wenku_txt import packed_lines, split_chapters
+from .wenku_txt import packed_lines, split_chapters, clean_text
 
 
 def convert_txt(data, filename, settings=None):
@@ -34,6 +34,7 @@ def convert_txt(data, filename, settings=None):
     if not isinstance(vol_label,str) or len(vol_label)>300: raise BookError('分卷标题格式无效。')
     number = VOLUME.search(title)
     vol_label = volume_title(vol_label or (number[0] if number else title))
+    text = clean_text(text)
     lines = packed_lines(text)
     banner = bool(re.match(r'\s*[★☆]+轻小说文库\(', text))
     headings = [line.strip() for line in lines if re.match(r'^ {1,2}\S', line) and len(line.strip())<=200]

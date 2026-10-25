@@ -18,7 +18,7 @@ import time
 from .books import BookError, Epub
 from .presentation import prepare_epub, serialize_xml
 from .metadata import volume_title, read_metadata, write_metadata, OPF
-from .wenku_txt import download_parameters, volume_id, parse_catalog, fetch_packed
+from .wenku_txt import download_parameters, volume_id, parse_catalog, fetch_packed, clean_download
 
 ROOT = Path(__file__).resolve().parent.parent
 VENDOR = ROOT / 'third_party' / 'mojimoon_wenku8'
@@ -127,19 +127,20 @@ def generate_no_images(aid, volume=1, scraper='requests', *, vid=None, fetcher=N
         selected['download_vid'] = vid if vid is not None else selected['vid']
         print('    从分卷 TXT 获取正文：aid=%s，vid=%s' % (aid,selected['download_vid']),flush=True)
         chapters,txt_url,encoding,cached,raw_txt = fetch_packed(fetcher,aid,selected,cache_root,detail.get('update',''),include_raw=True,parse_chapters=output_format != 'txt')
-        print('    %s，实际编码 %s%s' % ('复用 TXT 缓存' if cached else '已下载 TXT',encoding,('，%s 章' % len(chapters)) if output_format=='epub' else '，保留原始 TXT'),flush=True)
+        print('    %s，实际编码 %s%s' % ('复用 TXT 缓存' if cached else '已下载 TXT',encoding,('，%s 章' % len(chapters)) if output_format=='epub' else '，保存时还原字符实体并移除插图占位段落'),flush=True)
         vol_title = volume_title(selected['title'])
         title = (detail.get('title') or str(aid))+' '+vol_title
         description = detail.get('description','') if volume == 1 else ''
         origin = '全书简介' if description else ''
         series_index = str(volume)
         if output_format == 'txt':
+            saved_txt = clean_download(raw_txt)
             path = output/str(aid)/('v%02d.txt' % volume)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(raw_txt)
+            path.write_bytes(saved_txt)
             return {'aid':aid,'volume':volume,'vid':selected['download_vid'],'title':title,'file':str(path.resolve()),
                     'filename':re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',title)[:120]+'.txt',
-                    'size':len(raw_txt),'encoding':encoding,'format':'txt','author':detail.get('author',''),
+                    'size':len(saved_txt),'encoding':encoding,'format':'txt','author':detail.get('author',''),
                     'description':description,'description_source':origin,'series':detail.get('title',''),'series_index':series_index,'subjects':detail.get('tags','').split()}
         meta = upstream.NovelMeta(title=title,author=detail.get('author',''),source_url=upstream.book_url(aid),
             description=description,publisher=detail.get('publisher',''),subjects=detail.get('tags','').split(),
@@ -179,7 +180,7 @@ def main():
     parser.add_argument('--volume', default='1', help='文库目录中第几本（包含短篇集和外传），默认 1')
     parser.add_argument('--vid', help='可选的分卷 ID，留空时按卷序号自动取得')
     parser.add_argument('--scraper', choices=['requests', 'curl_cffi'], default='requests')
-    parser.add_argument('--format', dest='output_format', choices=['epub','txt'], default='epub', help='保存原始 TXT 或生成无图 EPUB')
+    parser.add_argument('--format', dest='output_format', choices=['epub','txt'], default='epub', help='清理并保存 TXT 或生成无图 EPUB')
     args = parser.parse_args()
     try:
         result = generate_no_images(args.aid, args.volume, args.scraper, vid=args.vid, output_format=args.output_format)
